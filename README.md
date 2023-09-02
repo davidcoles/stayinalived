@@ -25,7 +25,7 @@ set up an fwmark catchall service with no destinations and mark all traffic to v
 
 ```
 ipvsadm -A -f 666 -s rr
-iptables -A PREROUTING -t mangle -d 192.168.101.0/32 -j MARK --set-mark 666
+iptables -A PREROUTING -t mangle -d 192.168.101.0/24 -j MARK --set-mark 666
 ```
 
 then explictly mark desired service to bypass the catchall
