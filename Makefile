@@ -5,8 +5,8 @@ export CGO_LDFLAGS = -L$(LIBBPF)/bpf
 
 MAX_FLOWS ?= 100000
 
-stayinalived: stayinalived.go vc5/kernel/bpf/bpf.o static
-	go build stayinalived.go
+stayinalived: stayinalived.go vc5ng.go vc5/kernel/bpf/bpf.o static
+	go build stayinalived.go vc5ng.go
 
 static: vc5/cmd/static
 	cp -r $< $@
