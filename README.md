@@ -11,7 +11,7 @@ Very early work, not really for public consumption.
 Before running ...
 
 ```
-MY_ADDRESS=10.1.2.3
+MY_ADDRESS=$(hostname -I | cut -d' ' -f1)
 
 modprobe ip_vs
 sysctl net.ipv4.ip_forward=1
