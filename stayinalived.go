@@ -377,7 +377,6 @@ func main() {
 			s.Sub(stats, time.Now().Sub(t))
 			t = time.Now()
 			stats = s
-			fmt.Println(s.RHI)
 			if time.Now().Sub(start) > (time.Duration(conf.Learn) * time.Second) {
 				pool.NLRI(s.RHI)
 			}
