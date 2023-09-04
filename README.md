@@ -66,3 +66,10 @@ iptables -t nat -A POSTROUTING -m ipvs --ipvs -j SNAT --to-source 10.1.2.13 -s 0
 ```
 
 Maybe there's an easier way - answers on a postcard, please!
+
+
+
+iptables -A PREROUTING -t mangle -d 192.168.101.1/32 -p tcp --dport 80 -j MARK --set-mark 1
+iptables -A PREROUTING -t mangle -m set --match-set foobar dst,dst -j MARK --set-mark 1
+
+iptables -A PREROUTING -t mangle -m set --match-set foobar dst,dst -j MARK --set-mark 1
