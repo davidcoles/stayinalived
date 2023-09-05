@@ -45,6 +45,9 @@ I would dearly like to know if it is possible to avoid this
 ip link add ipvs type dummy
 ip a add 192.168.101.1/32 dev ipvs
 ip a add 192.168.101.2/32 dev ipvs
+ip a add 192.168.101.3/32 dev ipvs
+ip a add 192.168.101.4/32 dev ipvs
+ip a add 192.168.101.5/32 dev ipvs
 ```
 
 To mitigate port exhaustion with SNAT, it might be an idea to add some
@@ -69,7 +72,6 @@ Maybe there's an easier way - answers on a postcard, please!
 
 
 
+pset create ipvs hash:ip,port
 iptables -A PREROUTING -t mangle -d 192.168.101.1/32 -p tcp --dport 80 -j MARK --set-mark 1
-iptables -A PREROUTING -t mangle -m set --match-set foobar dst,dst -j MARK --set-mark 1
-
-iptables -A PREROUTING -t mangle -m set --match-set foobar dst,dst -j MARK --set-mark 1
+iptables -A PREROUTING -t mangle -m set --match-set ipvs dst,dst -j MARK --set-mark 1

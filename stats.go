@@ -1,17 +1,32 @@
+/*
+ * VC5 load balancer. Copyright (C) 2021-present David Coles
+ *
+ * This program is free software; you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License as published by
+ * the Free Software Foundation; either version 2 of the License, or
+ * (at your option) any later version.
+ *
+ * This program is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License along
+ * with this program; if not, write to the Free Software Foundation, Inc.,
+ * 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
+ */
+
 package main
 
 import (
 	"fmt"
 	"log"
-	"net"
 	"strings"
 	"sync"
 	"time"
-
-	"github.com/davidcoles/vc5"
 )
 
-func getStats(lb *vc5.BYOB) *Stats {
+func getStats(lb *LoadBalancer) *Stats {
 
 	now := time.Now()
 	status := lb.Status()
@@ -422,80 +437,4 @@ func (n *Stats) Sub(o *Stats, dur time.Duration) *Stats {
 	}
 
 	return n
-}
-
-/**********************************************************************/
-
-const maxDatagramSize = 1500
-
-func multicast_send(lb *vc5.LoadBalancer, address string) {
-
-	addr, err := net.ResolveUDPAddr("udp", address)
-
-	if err != nil {
-		log.Fatal(err)
-	}
-
-	conn, err := net.DialUDP("udp", nil, addr)
-
-	if err != nil {
-		log.Fatal(err)
-	}
-
-	conn.SetWriteBuffer(maxDatagramSize * 100)
-
-	ticker := time.NewTicker(time.Millisecond * 10)
-
-	var buff [maxDatagramSize]byte
-
-	for {
-		select {
-		case <-ticker.C:
-			n := 0
-
-		read_queue:
-			f := lb.FlowQueue()
-			if len(f) > 0 {
-				buff[n] = uint8(len(f))
-
-				copy(buff[n+1:], f[:])
-				n += 1 + len(f)
-				if n < maxDatagramSize-100 {
-					goto read_queue
-				}
-			}
-
-			if n > 0 {
-				conn.Write(buff[:n])
-			}
-		}
-	}
-}
-
-func multicast_recv(lb *vc5.LoadBalancer, address string) {
-	udp, err := net.ResolveUDPAddr("udp", address)
-
-	if err != nil {
-		log.Fatal(err)
-	}
-
-	conn, err := net.ListenMulticastUDP("udp", nil, udp)
-
-	conn.SetReadBuffer(maxDatagramSize * 1000)
-
-	buff := make([]byte, maxDatagramSize)
-
-	for {
-		nread, _, err := conn.ReadFromUDP(buff)
-		if err == nil {
-			for n := 0; n+1 < nread; {
-				l := int(buff[n])
-				o := n + 1
-				n = o + l
-				if l > 0 && n <= nread {
-					lb.StoreFlow(buff[o:n])
-				}
-			}
-		}
-	}
 }

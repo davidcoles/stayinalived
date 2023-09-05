@@ -25,10 +25,11 @@ var STATIC embed.FS
 type IP4 = vc5.IP4
 type L4 = vc5.L4
 type Target = vc5.Target
+type LoadBalancer = vc5.BYOB
 
 var logger *Logger
 
-var ipset = flag.String("i", "", "ipset")
+var ipset = flag.String("i", "", "ipset to add/delete IP/port to (type hash:ip,port)")
 var root = flag.String("r", "", "webserver root directory")
 var websrv = flag.String("w", ":9999", "webserver address:port to listen on")
 var nolabel = flag.Bool("N", false, "don't add 'name' label to prometheus metrics")
@@ -58,8 +59,6 @@ func main() {
 
 	hc, err := vc5.Load(conf)
 
-	//balancer := &balancer{
-	//}
 	balancer, err := New(*ipset)
 
 	if err != nil {
@@ -83,7 +82,7 @@ func main() {
 		Logger: logger,
 	}
 
-	err = lb.Start(balancer, hc)
+	err = lb.Start(addr, hc, balancer)
 
 	if err != nil {
 		log.Fatal(err)
@@ -139,7 +138,7 @@ func main() {
 			if time.Now().Sub(start) > (time.Duration(conf.Learn) * time.Second) {
 				pool.NLRI(s.RHI)
 			}
-			time.Sleep(11 * time.Second)
+			time.Sleep(3 * time.Second)
 		}
 	}()
 
