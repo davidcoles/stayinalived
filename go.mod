@@ -2,8 +2,8 @@ module stayinalived
 
 go 1.18
 
-//replace github.com/davidcoles/vc5 => ./vc5
-replace github.com/davidcoles/vc5 => ../vc5
+replace github.com/davidcoles/vc5 => ./vc5
+//replace github.com/davidcoles/vc5 => ../vc5
 
 require (
 	github.com/cloudflare/ipvs v0.10.0
