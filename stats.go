@@ -61,7 +61,7 @@ func getStats(lb *LoadBalancer) *Stats {
 		var servers uint8
 		var healthy uint8
 
-		for rip, real := range s.Reals {
+		for rip, real := range s.Reals_() {
 			servers++
 
 			probe := real.Probe()

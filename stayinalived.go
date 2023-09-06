@@ -47,6 +47,15 @@ func main() {
 
 	conf, err := vc5.LoadConf(file)
 
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	//fmt.Println(conf.RHI)
+	j, _ := json.MarshalIndent(conf, "", "    ")
+	fmt.Println(string(j))
+	//return
+
 	if conf.Webserver != "" {
 		*websrv = conf.Webserver
 	}
