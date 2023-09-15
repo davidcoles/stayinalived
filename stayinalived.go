@@ -29,7 +29,8 @@ type LoadBalancer = vc5.BYOB
 
 var logger *Logger
 
-var ipset = flag.String("i", "", "ipset to add/delete IP/port to (type hash:ip,port)")
+var ipset = flag.String("s", "", "ipset to add/delete IP/port to (type hash:ip,port)")
+var iface = flag.String("i", "lo", "interface to add VIPs to")
 var root = flag.String("r", "", "webserver root directory")
 var websrv = flag.String("w", ":9999", "webserver address:port to listen on")
 var nolabel = flag.Bool("N", false, "don't add 'name' label to prometheus metrics")
@@ -51,10 +52,11 @@ func main() {
 		log.Fatal(err)
 	}
 
-	//fmt.Println(conf.RHI)
-	j, _ := json.MarshalIndent(conf, "", "    ")
-	fmt.Println(string(j))
-	//return
+	if true {
+		j, err := json.MarshalIndent(conf, "", "    ")
+		fmt.Println(string(j), err)
+		//return
+	}
 
 	if conf.Webserver != "" {
 		*websrv = conf.Webserver
@@ -68,7 +70,7 @@ func main() {
 
 	hc, err := vc5.Load(conf)
 
-	balancer, err := New(*ipset)
+	balancer, err := New(*ipset, *iface)
 
 	if err != nil {
 		log.Fatalf("balancer: %v", err)

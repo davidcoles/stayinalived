@@ -26,7 +26,7 @@ type ipport struct {
 	port uint16
 }
 
-func New(ipset string) (*balancer, error) {
+func New(ipset, iface string) (*balancer, error) {
 	vs, err := ipvs.New()
 
 	if err != nil {
@@ -37,7 +37,7 @@ func New(ipset string) (*balancer, error) {
 		ipsetgo.Flush(ipset)
 	}
 
-	link, err := netlink.LinkByName("ipvs")
+	link, err := netlink.LinkByName(iface)
 	if err != nil {
 		return nil, err
 	}
@@ -49,146 +49,7 @@ func New(ipset string) (*balancer, error) {
 	}, nil
 }
 
-func (b *balancer) _Configure(h vc5.Healthchecks) {
-	println("CONFIGURE")
-
-	if false {
-		j, _ := json.MarshalIndent(&h, "", "    ")
-		fmt.Println(string(j))
-	}
-
-	type serv struct {
-		ip       IP4
-		port     uint16
-		protocol uint16
-	}
-
-	existing := map[serv]ipvs.Service{}
-
-	services, err := b.ipvs.Services()
-
-	for _, svc := range services {
-		if svc.Address.Is4() {
-			existing[serv{ip: svc.Address.As4(), port: svc.Port, protocol: uint16(svc.Protocol)}] = svc.Service
-		}
-	}
-
-	for vip, virtual := range h.Virtual {
-		for l4, service := range virtual.Services {
-
-			proto := ipvs.TCP
-
-			if l4.Protocol {
-				proto = ipvs.UDP
-			}
-
-			if b.ipset != "" {
-
-				p := uint8(proto)
-
-				ipsetgo.Add(b.ipset, &ipsetgo.Entry{
-					IP:       net.IPv4(vip[0], vip[1], vip[2], vip[3]),
-					Protocol: &p,
-					Port:     &l4.Port,
-				})
-			}
-
-			ipConfig := &netlink.Addr{IPNet: &net.IPNet{
-				IP:   net.IPv4(vip[0], vip[1], vip[2], vip[3]), //net.ParseIP("192.168.0.2"),
-				Mask: net.CIDRMask(32, 32),
-			}}
-
-			netlink.AddrAdd(b.link, ipConfig)
-			//if err = netlink.AddrAdd(b.link, ipConfig); err != nil {
-			//	log.Fatal(err)
-			//}
-
-			if false {
-				fmt.Println(vip, l4, service.Healthy)
-			}
-
-			svc := ipvs.Service{
-				Address:   netip.AddrFrom4(vip),
-				Netmask:   netmask.MaskFrom4([4]byte{255, 255, 255, 255}),
-				Scheduler: "wrr",
-				Port:      l4.Port,
-				Family:    ipvs.INET,
-				Protocol:  proto,
-				Flags:     ipvs.ServiceHashed,
-			}
-
-			bar := serv{ip: vip, port: l4.Port, protocol: uint16(proto)}
-
-			if s, ok := existing[bar]; ok {
-
-				if s != svc {
-
-					log.Println("Service needs updating in IPVS:", vip, l4, s, svc)
-
-					err = b.ipvs.UpdateService(svc)
-
-					if err != nil {
-						log.Println("failed updating Service in IPVS", err)
-					}
-				}
-
-			} else {
-
-				log.Println("Creating Service in IPVS:", vip, l4)
-
-				err = b.ipvs.CreateService(svc)
-
-				if err != nil {
-					log.Println("failed creating Service in IPVS", err)
-				}
-			}
-
-			reals := map[ipport]bool{}
-
-			//for k, v := range service.Reals {
-			//	reals[ipport{ip: k, port: v.Port}] = v.Probe.Passed
-			//}
-			for _, v := range service.Destinations() {
-				reals[ipport{ip: v.Address, port: v.Port}] = v.Up
-			}
-
-			b.destinations(svc, reals)
-
-			delete(existing, bar)
-
-		}
-	}
-
-	for _, svc := range existing {
-
-		as4 := svc.Address.As4()
-		ip4 := net.IPv4(as4[0], as4[1], as4[2], as4[3])
-
-		if b.ipset != "" {
-			p := uint8(svc.Protocol)
-
-			ipsetgo.Del(b.ipset, &ipsetgo.Entry{
-				IP:       ip4,
-				Protocol: &p,
-				Port:     &svc.Port,
-			})
-		}
-
-		ipConfig := &netlink.Addr{IPNet: &net.IPNet{
-			IP:   ip4,
-			Mask: net.CIDRMask(32, 32),
-		}}
-
-		netlink.AddrDel(b.link, ipConfig)
-
-		if err = b.ipvs.RemoveService(svc); err != nil {
-			log.Println("failed removing Service in IPVS", err)
-		}
-	}
-
-}
-
-func (f *balancer) destinations(svc ipvs.Service, reals map[ipport]bool) {
+func (f *balancer) destinations(svc ipvs.Service, ft ipvs.ForwardType, reals map[ipport]bool) {
 
 	vs := map[string]ipvs.DestinationExtended{}
 
@@ -210,10 +71,11 @@ func (f *balancer) destinations(svc ipvs.Service, reals map[ipport]bool) {
 
 		dst := ipvs.Destination{
 			Address:   netip.AddrFrom4(k.ip),
-			FwdMethod: ipvs.Masquarade,
-			Weight:    weight,
-			Port:      k.port,
-			Family:    ipvs.INET,
+			FwdMethod: ft,
+			//FwdMethod: ipvs.Tunnel,
+			Weight: weight,
+			Port:   k.port,
+			Family: ipvs.INET,
 		}
 
 		if d, ok := vs[addr]; ok {
@@ -242,7 +104,9 @@ func (f *balancer) Close() {
 }
 
 /********************************************************************************/
-func (f *balancer) Stats(h vc5.Healthchecks) map[vc5.Target]vc5.Counter {
+func (f *balancer) Stats(h vc5.Healthchecks) (vc5.Counter, map[vc5.Target]vc5.Counter) {
+
+	var global vc5.Counter
 
 	vs := map[string]vc5.Counter{}
 	ret := map[vc5.Target]vc5.Counter{}
@@ -250,7 +114,7 @@ func (f *balancer) Stats(h vc5.Healthchecks) map[vc5.Target]vc5.Counter {
 	services, err := f.ipvs.Services()
 
 	if err != nil {
-		return ret
+		return global, ret
 	}
 
 	for _, svc := range services {
@@ -294,36 +158,13 @@ func (f *balancer) Stats(h vc5.Healthchecks) map[vc5.Target]vc5.Counter {
 			   }
 			*/
 		}
-
 	}
 
-	// for vip, virtual := range h.Virtual {
-	// 	for l4, service := range virtual.Services {
-	// 		for rip, _ := range service.Reals {
-
-	// 			proto := ipvs.TCP
-
-	// 			if l4.Protocol {
-	// 				proto = ipvs.UDP
-	// 			}
-
-	// 			addr := fmt.Sprintf("%s:%d:%s:%s", vip, l4.Port, proto, rip)
-
-	// 			if c, ok := vs[addr]; ok {
-	// 				t := Target{VIP: vip, RIP: rip, Port: l4.Port, Protocol: l4.Protocol.Number()}
-	// 				ret[t] = c
-	// 			}
-
-	// 		}
-	// 	}
-	// }
-
-	//for vip, virtual := range h.Virtual {
-	//	for l4, service := range virtual.Services {
 	for svc, service := range h.Services() {
 		vip := svc.VIP
 		l4 := svc.L4()
-		for rip, _ := range service.Reals_() {
+		for _, real := range service.Reals() {
+			rip := real.RIP
 
 			proto := ipvs.TCP
 
@@ -336,17 +177,18 @@ func (f *balancer) Stats(h vc5.Healthchecks) map[vc5.Target]vc5.Counter {
 			if c, ok := vs[addr]; ok {
 				t := Target{VIP: vip, RIP: rip, Port: l4.Port, Protocol: l4.Protocol.Number()}
 				ret[t] = c
+				global.Add(c)
 			}
 
 		}
 		//}
 	}
 
-	return ret
+	return global, ret
 }
 
 func (b *balancer) Configure(h vc5.Healthchecks) {
-	println("CONFIGURE2")
+	println("CONFIGURE")
 
 	if false {
 		j, _ := json.MarshalIndent(&h, "", "    ")
@@ -374,15 +216,15 @@ func (b *balancer) Configure(h vc5.Healthchecks) {
 		udp := service.UDP
 		port := service.Port
 
-		proto := ipvs.TCP
+		protocol := ipvs.TCP
 
 		if udp {
-			proto = ipvs.UDP
+			protocol = ipvs.UDP
 		}
 
 		if b.ipset != "" {
 
-			p := uint8(proto)
+			p := uint8(protocol)
 
 			ipsetgo.Add(b.ipset, &ipsetgo.Entry{
 				IP:       net.IPv4(vip[0], vip[1], vip[2], vip[3]),
@@ -405,21 +247,36 @@ func (b *balancer) Configure(h vc5.Healthchecks) {
 			fmt.Println(vip, port, service.UDP, service.Healthy)
 		}
 
+		//var sched vc5.Scheduler = vc5.WLC //= vc5.WRR
+		//var sticky bool = false
+
+		sched := service.Scheduler
+		sticky := service.Sticky
+
+		fmt.Println(sched.String())
+
+		name, flags := IPVS(sched, sticky)
+
 		svc := ipvs.Service{
-			Address:   netip.AddrFrom4(vip),
-			Netmask:   netmask.MaskFrom4([4]byte{255, 255, 255, 255}),
-			Scheduler: "wrr",
-			Port:      port,
-			Family:    ipvs.INET,
-			Protocol:  proto,
-			Flags:     ipvs.ServiceHashed,
+			Address:  netip.AddrFrom4(vip),
+			Netmask:  netmask.MaskFrom4([4]byte{255, 255, 255, 255}),
+			Family:   ipvs.INET,
+			Protocol: protocol,
+			Port:     port,
+
+			Scheduler: name,
+			Flags:     flags,
 		}
 
-		bar := serv{ip: vip, port: port, protocol: uint16(proto)}
+		bar := serv{ip: vip, port: port, protocol: uint16(protocol)}
 
 		if s, ok := existing[bar]; ok {
 
-			if s != svc {
+			x := svc
+			x.Flags |= ipvs.ServiceHashed
+			s.Flags |= ipvs.ServiceHashed
+
+			if s != x {
 
 				log.Println("Service needs updating in IPVS:", vip, port, udp, s, svc)
 
@@ -443,14 +300,15 @@ func (b *balancer) Configure(h vc5.Healthchecks) {
 
 		reals := map[ipport]bool{}
 
-		//for k, v := range service.Reals {
-		//	reals[ipport{ip: k, port: v.Port}] = v.Probe.Passed
-		//}
 		for _, v := range service.Destinations() {
 			reals[ipport{ip: v.Address, port: v.Port}] = v.Up
 		}
 
-		b.destinations(svc, reals)
+		ft := ipvs.Masquarade
+		//ft := ipvs.DirectRoute
+		//ft := ipvs.Tunnel
+
+		b.destinations(svc, ft, reals)
 
 		delete(existing, bar)
 
@@ -471,16 +329,52 @@ func (b *balancer) Configure(h vc5.Healthchecks) {
 			})
 		}
 
-		ipConfig := &netlink.Addr{IPNet: &net.IPNet{
-			IP:   ip4,
-			Mask: net.CIDRMask(32, 32),
-		}}
-
-		netlink.AddrDel(b.link, ipConfig)
+		//ipConfig := &netlink.Addr{IPNet: &net.IPNet{
+		//	IP:   ip4,
+		//	Mask: net.CIDRMask(32, 32),
+		//}}
+		//netlink.AddrDel(b.link, ipConfig)
 
 		if err = b.ipvs.RemoveService(svc); err != nil {
 			log.Println("failed removing Service in IPVS", err)
 		}
 	}
+}
 
+func IPVS(s vc5.Scheduler, sticky bool) (string, ipvs.Flags) {
+	// rr    - Round Robin
+	// wrr   - Weighted Round Robin
+	// lc    - Least-Connection
+	// wlc   - Weighted  Least-Connection
+	// lblc  - Locality-Based Least-Connection
+	// lblcr - Locality-Based Least-Connection with Replication
+	// dh    - Destination Hashing
+	// sh    - Source Hashing: sh-fallback, sh-port
+	// sed   - Shortest Expected Delay
+	// nq    - Never  Queue
+	// fo    - Weighted Failover
+	// ovf   - Weighted Overflow
+	// mh    - Maglev Hashing: mh-fallback, mh-port
+
+	const (
+		MH_FALLBACK = ipvs.ServiceSchedulerOpt1
+		MH_PORT     = ipvs.ServiceSchedulerOpt2
+	)
+
+	var flags ipvs.Flags //= ipvs.ServiceHashed // seems to get set by default
+
+	if sticky {
+		flags |= ipvs.ServicePersistent
+	}
+
+	switch s {
+	case vc5.WRR:
+		return "wrr", flags
+	case vc5.WLC:
+		return "wlc", flags
+	case vc5.MH_PORT:
+		return "mh", flags | MH_PORT | MH_FALLBACK
+	}
+
+	return "wlc", flags
 }
