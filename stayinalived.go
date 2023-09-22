@@ -89,11 +89,12 @@ func main() {
 		log.Fatal("BGP peer initialisation failed")
 	}
 
-	lb := &vc5.BYOB{
-		Logger: logger,
+	lb := &vc5.Director{
+		Balancer: balancer,
+		Logger:   logger,
 	}
 
-	err = lb.Start(addr, hc, balancer)
+	err = lb.Start(addr, hc)
 
 	if err != nil {
 		log.Fatal(err)

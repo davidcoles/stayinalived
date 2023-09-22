@@ -79,3 +79,26 @@ Maybe there's an easier way - answers on a postcard, please!
 iptables -t nat -A POSTROUTING -m ipvs --ipvs -j SNAT --to-source 10.7.115.99 ! -p 4
 
 iptables -t mangle -A FORWARD -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss 1440 -m set --match-set ipip src,src
+
+
+```
+cat >>/etc/modules <<EOF
+ip_vs_wlc
+ip_vs_mh
+ip_vs_lc
+ip_vs_wrr
+ip_vs_rr
+ip_vs
+EOF
+
+cat >>/etc/sysctl.conf <<EOF
+net.ipv4.ip_forward=1
+net.ipv4.vs.conntrack=1
+EOF
+
+ipset create ipvs hash:ip,port
+ipvsadm -A -f 666 -s rr
+iptables -A PREROUTING -t mangle -d 192.168.101.0/24 -j MARK --set-mark 666
+iptables -A PREROUTING -t mangle -m set --match-set ipvs dst,dst -j MARK --set-mark 1
+iptables -A POSTROUTING -t nat -m ipvs --ipvs -j SNAT --to-source $(hostname -I | cut -d' ' -f1)
+```

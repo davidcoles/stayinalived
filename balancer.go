@@ -160,7 +160,7 @@ func (f *balancer) Stats(h vc5.Healthchecks) (vc5.Counter, map[vc5.Target]vc5.Co
 		}
 	}
 
-	for svc, service := range h.Services() {
+	for svc, service := range h.Services__() {
 		vip := svc.VIP
 		l4 := svc.L4()
 		for _, real := range service.Reals() {
@@ -211,7 +211,7 @@ func (b *balancer) Configure(h vc5.Healthchecks) {
 		}
 	}
 
-	for _, service := range h.Services() {
+	for _, service := range h.Services__() {
 		vip := service.VIP
 		udp := service.UDP
 		port := service.Port
