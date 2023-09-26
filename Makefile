@@ -9,7 +9,7 @@ stayinalived: stayinalived.go balancer.go stats.go vc5/kernel/bpf/bpf.o static
 	go build stayinalived.go balancer.go stats.go
 
 static: vc5 vc5/cmd/static
-	cp -r vc5/cmd/static $@
+	cp -r vc5/cmd/static ./
 
 stats.go: vc5 vc5/cmd/stats.go
 	cp vc5/cmd/stats.go $@

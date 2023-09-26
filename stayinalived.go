@@ -25,7 +25,7 @@ var STATIC embed.FS
 type IP4 = vc5.IP4
 type L4 = vc5.L4
 type Target = vc5.Target
-type LoadBalancer = vc5.BYOB
+type Balancer = vc5.Balancer
 
 var logger *Logger
 
@@ -70,6 +70,10 @@ func main() {
 
 	hc, err := vc5.Load(conf)
 
+	if err != nil {
+		log.Fatal(err)
+	}
+
 	balancer, err := New(*ipset, *iface)
 
 	if err != nil {
@@ -89,12 +93,12 @@ func main() {
 		log.Fatal("BGP peer initialisation failed")
 	}
 
-	lb := &vc5.Director{
+	director := &vc5.Director{
 		Balancer: balancer,
 		Logger:   logger,
 	}
 
-	err = lb.Start(addr, hc)
+	err = director.Start(addr, hc)
 
 	if err != nil {
 		log.Fatal(err)
@@ -106,7 +110,8 @@ func main() {
 	}()
 
 	sig := make(chan os.Signal)
-	signal.Notify(sig, syscall.SIGUSR2, syscall.SIGQUIT)
+	//signal.Notify(sig, syscall.SIGUSR2, syscall.SIGQUIT)
+	signal.Notify(sig, syscall.SIGINT)
 	//signal.Notify(sig) // all the signals!
 
 	go func() {
@@ -115,9 +120,9 @@ func main() {
 			switch s {
 			case syscall.SIGQUIT:
 				fallthrough
-			case syscall.SIGUSR2:
+			case syscall.SIGINT:
 				log.Println("RELOAD")
-				time.Sleep(1 * time.Second)
+				//time.Sleep(1 * time.Second)
 
 				conf, err := vc5.LoadConf(file)
 
@@ -129,7 +134,7 @@ func main() {
 					} else {
 						hc = h
 						pool.Peer(conf.RHI.Peers)
-						lb.Update(hc)
+						director.Update(hc)
 					}
 				}
 			}
@@ -143,7 +148,7 @@ func main() {
 		var t time.Time
 
 		for {
-			s := getStats(lb)
+			s := getStats(balancer)
 			s.Sub(stats, time.Now().Sub(t))
 			t = time.Now()
 			stats = s
@@ -210,7 +215,7 @@ func main() {
 
 	http.HandleFunc("/status.json", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		cf := lb.Status()
+		cf := director.Status()
 		j, err := json.MarshalIndent(cf, "", "  ")
 
 		if err != nil {

@@ -16,9 +16,11 @@ import (
 )
 
 type balancer struct {
-	ipvs  ipvs.Client
-	ipset string
-	link  netlink.Link
+	ipvs   ipvs.Client
+	ipset  string
+	link   netlink.Link
+	config *vc5.Healthchecks
+	probes *vc5.Probes
 }
 
 type ipport struct {
@@ -103,15 +105,21 @@ func (f *balancer) destinations(svc ipvs.Service, ft ipvs.ForwardType, reals map
 func (f *balancer) Close() {
 }
 
+func (b *balancer) Status() vc5.Healthchecks {
+	r := b.config.DeepCopy()
+	return *r
+}
+
 /********************************************************************************/
-func (f *balancer) Stats(h vc5.Healthchecks) (vc5.Counter, map[vc5.Target]vc5.Counter) {
+//func (b *balancer) Stats(h vc5.Healthchecks) (vc5.Counter, map[vc5.Target]vc5.Counter) {
+func (b *balancer) Stats() (vc5.Counter, map[vc5.Target]vc5.Counter) {
 
 	var global vc5.Counter
 
 	vs := map[string]vc5.Counter{}
 	ret := map[vc5.Target]vc5.Counter{}
 
-	services, err := f.ipvs.Services()
+	services, err := b.ipvs.Services()
 
 	if err != nil {
 		return global, ret
@@ -127,7 +135,7 @@ func (f *balancer) Stats(h vc5.Healthchecks) (vc5.Counter, map[vc5.Target]vc5.Co
 
 		s := svc.Service
 
-		dests, _ := f.ipvs.Destinations(s)
+		dests, _ := b.ipvs.Destinations(s)
 
 		for _, dst := range dests {
 
@@ -160,7 +168,7 @@ func (f *balancer) Stats(h vc5.Healthchecks) (vc5.Counter, map[vc5.Target]vc5.Co
 		}
 	}
 
-	for svc, service := range h.Services__() {
+	for svc, service := range b.config.Services__() {
 		vip := svc.VIP
 		l4 := svc.L4()
 		for _, real := range service.Reals() {
@@ -187,11 +195,25 @@ func (f *balancer) Stats(h vc5.Healthchecks) (vc5.Counter, map[vc5.Target]vc5.Co
 	return global, ret
 }
 
-func (b *balancer) Configure(h vc5.Healthchecks) {
+func (b *balancer) Start(ip string, hc *vc5.Healthchecks) error {
+	b.probes = &vc5.Probes{}
+	b.probes.Start(ip)
+	b.Configure(hc)
+	return nil
+}
+
+func (b *balancer) Checker() vc5.Checker {
+	//return &checker{socket: v.Socket}
+	return b.probes
+}
+
+func (b *balancer) Configure(x *vc5.Healthchecks) {
 	println("CONFIGURE")
 
+	b.config = x
+
 	if false {
-		j, _ := json.MarshalIndent(&h, "", "    ")
+		j, _ := json.MarshalIndent(b.config, "", "    ")
 		fmt.Println(string(j))
 	}
 
@@ -211,16 +233,13 @@ func (b *balancer) Configure(h vc5.Healthchecks) {
 		}
 	}
 
-	for _, service := range h.Services__() {
-		vip := service.VIP
-		udp := service.UDP
+	//for _, service := range b.config.Services__() {
+	services_, _ := b.config.Services()
+	for _, service := range services_ {
+		vip := service.Address
 		port := service.Port
 
-		protocol := ipvs.TCP
-
-		if udp {
-			protocol = ipvs.UDP
-		}
+		protocol := ipvs.Protocol(service.Protocol)
 
 		if b.ipset != "" {
 
@@ -242,10 +261,6 @@ func (b *balancer) Configure(h vc5.Healthchecks) {
 		//if err = netlink.AddrAdd(b.link, ipConfig); err != nil {
 		//	log.Fatal(err)
 		//}
-
-		if false {
-			fmt.Println(vip, port, service.UDP, service.Healthy)
-		}
 
 		//var sched vc5.Scheduler = vc5.WLC //= vc5.WRR
 		//var sticky bool = false
@@ -278,7 +293,7 @@ func (b *balancer) Configure(h vc5.Healthchecks) {
 
 			if s != x {
 
-				log.Println("Service needs updating in IPVS:", vip, port, udp, s, svc)
+				log.Println("Service needs updating in IPVS:", vip, port, protocol, s, svc)
 
 				err = b.ipvs.UpdateService(svc)
 
@@ -289,7 +304,7 @@ func (b *balancer) Configure(h vc5.Healthchecks) {
 
 		} else {
 
-			log.Println("Creating Service in IPVS:", vip, port, udp)
+			log.Println("Creating Service in IPVS:", vip, port, protocol)
 
 			err = b.ipvs.CreateService(svc)
 
@@ -300,7 +315,9 @@ func (b *balancer) Configure(h vc5.Healthchecks) {
 
 		reals := map[ipport]bool{}
 
-		for _, v := range service.Destinations() {
+		//for _, v := range service.Destinations() {
+		destinations, _ := b.config.Destinations(service)
+		for _, v := range destinations {
 			reals[ipport{ip: v.Address, port: v.Port}] = v.Up
 		}
 
