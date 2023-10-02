@@ -19,6 +19,15 @@ import (
 	"github.com/davidcoles/vc5/bgp4"
 )
 
+/*
+
+TDOD:
+
+* remove unused ip addresses from interface
+* expiry for ipset + periodic updates
+
+*/
+
 //go:embed static/*
 var STATIC embed.FS
 

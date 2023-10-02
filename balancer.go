@@ -6,6 +6,7 @@ import (
 	"log"
 	"net"
 	"net/netip"
+	"sync"
 
 	"github.com/davidcoles/vc5"
 
@@ -21,6 +22,9 @@ type balancer struct {
 	link   netlink.Link
 	config *vc5.Healthchecks
 	probes *vc5.Probes
+	mutex  sync.Mutex
+	vips   map[IP4]bool
+	c      chan *vc5.Healthchecks
 }
 
 type ipport struct {
@@ -51,57 +55,6 @@ func New(ipset, iface string) (*balancer, error) {
 	}, nil
 }
 
-func (f *balancer) destinations(svc ipvs.Service, ft ipvs.ForwardType, reals map[ipport]bool) {
-
-	vs := map[string]ipvs.DestinationExtended{}
-
-	dests, err := f.ipvs.Destinations(svc)
-
-	for _, dst := range dests {
-		addr := fmt.Sprintf("%s:%d", dst.Address, dst.Port)
-		vs[addr] = dst
-	}
-
-	for k, v := range reals {
-		addr := fmt.Sprintf("%s:%d", k.ip, k.port)
-
-		var weight uint32
-
-		if v {
-			weight = 1
-		}
-
-		dst := ipvs.Destination{
-			Address:   netip.AddrFrom4(k.ip),
-			FwdMethod: ft,
-			//FwdMethod: ipvs.Tunnel,
-			Weight: weight,
-			Port:   k.port,
-			Family: ipvs.INET,
-		}
-
-		if d, ok := vs[addr]; ok {
-
-			if d.Destination != dst {
-				if err = f.ipvs.UpdateDestination(svc, dst); err != nil {
-					log.Println("destination update failed", addr)
-				}
-			}
-
-		} else {
-			if err = f.ipvs.CreateDestination(svc, dst); err != nil {
-				log.Println("error creating destination:", addr, err)
-			}
-		}
-
-		delete(vs, addr)
-	}
-
-	for _, dst := range vs {
-		f.ipvs.RemoveDestination(svc, dst.Destination)
-	}
-}
-
 func (f *balancer) Close() {
 }
 
@@ -110,8 +63,29 @@ func (b *balancer) Status() vc5.Healthchecks {
 	return *r
 }
 
+func (b *balancer) Start(ip string, hc *vc5.Healthchecks) error {
+	b.c = make(chan *vc5.Healthchecks, 100)
+	b.vips = map[IP4]bool{}
+	b.probes = &vc5.Probes{}
+	b.probes.Start(ip)
+	b.Configure(hc)
+	return nil
+}
+
+func (b *balancer) Stop() {
+	close(b.c)
+}
+
+func (b *balancer) Checker() vc5.Checker {
+	return b.probes
+}
+
+func (b *balancer) Configure(config *vc5.Healthchecks) {
+	b.configure(config)
+}
+
 /********************************************************************************/
-//func (b *balancer) Stats(h vc5.Healthchecks) (vc5.Counter, map[vc5.Target]vc5.Counter) {
+
 func (b *balancer) Stats() (vc5.Counter, map[vc5.Target]vc5.Counter) {
 
 	var global vc5.Counter
@@ -146,25 +120,9 @@ func (b *balancer) Stats() (vc5.Counter, map[vc5.Target]vc5.Counter) {
 			c := dst.Stats64
 
 			vs[addr] = vc5.Counter{
-				//Concurrent: c.Connections,
 				Octets:  c.OutgoingBytes,
 				Packets: c.OutgoingPackets,
-				//Octets:  c.IncomingBytes,
-				//Packets: c.IncomingPackets,
 			}
-
-			/*
-			   type Counter struct {
-			       Octets      uint64
-			       Packets     uint64
-			       Flows       uint64
-			       Concurrent  uint64
-			       Blocked     uint64
-			       Latency     uint64 // global only
-			       QueueFailed uint64 // global only
-			       DEFCON      uint8  // global only
-			   }
-			*/
 		}
 	}
 
@@ -187,30 +145,23 @@ func (b *balancer) Stats() (vc5.Counter, map[vc5.Target]vc5.Counter) {
 				ret[t] = c
 				global.Add(c)
 			}
-
 		}
-		//}
 	}
 
 	return global, ret
 }
 
-func (b *balancer) Start(ip string, hc *vc5.Healthchecks) error {
-	b.probes = &vc5.Probes{}
-	b.probes.Start(ip)
-	b.Configure(hc)
-	return nil
-}
+/********************************************************************************/
 
-func (b *balancer) Checker() vc5.Checker {
-	//return &checker{socket: v.Socket}
-	return b.probes
-}
-
-func (b *balancer) Configure(x *vc5.Healthchecks) {
+func (b *balancer) configure(config *vc5.Healthchecks) {
 	println("CONFIGURE")
 
-	b.config = x
+	b.mutex.Lock()
+	defer b.mutex.Unlock()
+
+	vips := map[IP4]bool{}
+
+	b.config = config
 
 	if false {
 		j, _ := json.MarshalIndent(b.config, "", "    ")
@@ -225,63 +176,26 @@ func (b *balancer) Configure(x *vc5.Healthchecks) {
 
 	existing := map[serv]ipvs.Service{}
 
-	services, err := b.ipvs.Services()
-
-	for _, svc := range services {
+	ipvsServices, err := b.ipvs.Services()
+	for _, svc := range ipvsServices {
 		if svc.Address.Is4() {
 			existing[serv{ip: svc.Address.As4(), port: svc.Port, protocol: uint16(svc.Protocol)}] = svc.Service
 		}
 	}
 
-	//for _, service := range b.config.Services__() {
-	services_, _ := b.config.Services()
-	for _, service := range services_ {
+	services, _ := b.config.Services()
+	for _, service := range services {
 		vip := service.Address
 		port := service.Port
+		protocol := service.Protocol
 
-		protocol := ipvs.Protocol(service.Protocol)
+		vips[vip] = true
 
 		if b.ipset != "" {
-
-			p := uint8(protocol)
-
-			ipsetgo.Add(b.ipset, &ipsetgo.Entry{
-				IP:       net.IPv4(vip[0], vip[1], vip[2], vip[3]),
-				Protocol: &p,
-				Port:     &port,
-			})
+			ipsetgo.Add(b.ipset, ipsetEntry(vip, port, protocol))
 		}
 
-		ipConfig := &netlink.Addr{IPNet: &net.IPNet{
-			IP:   net.IPv4(vip[0], vip[1], vip[2], vip[3]), //net.ParseIP("192.168.0.2"),
-			Mask: net.CIDRMask(32, 32),
-		}}
-
-		netlink.AddrAdd(b.link, ipConfig)
-		//if err = netlink.AddrAdd(b.link, ipConfig); err != nil {
-		//	log.Fatal(err)
-		//}
-
-		//var sched vc5.Scheduler = vc5.WLC //= vc5.WRR
-		//var sticky bool = false
-
-		sched := service.Scheduler
-		sticky := service.Sticky
-
-		fmt.Println(sched.String())
-
-		name, flags := IPVS(sched, sticky)
-
-		svc := ipvs.Service{
-			Address:  netip.AddrFrom4(vip),
-			Netmask:  netmask.MaskFrom4([4]byte{255, 255, 255, 255}),
-			Family:   ipvs.INET,
-			Protocol: protocol,
-			Port:     port,
-
-			Scheduler: name,
-			Flags:     flags,
-		}
+		svc := ipvsService(service)
 
 		bar := serv{ip: vip, port: port, protocol: uint16(protocol)}
 
@@ -315,50 +229,122 @@ func (b *balancer) Configure(x *vc5.Healthchecks) {
 
 		reals := map[ipport]bool{}
 
-		//for _, v := range service.Destinations() {
 		destinations, _ := b.config.Destinations(service)
 		for _, v := range destinations {
 			reals[ipport{ip: v.Address, port: v.Port}] = v.Up
 		}
 
-		ft := ipvs.Masquarade
-		//ft := ipvs.DirectRoute
-		//ft := ipvs.Tunnel
-
-		b.destinations(svc, ft, reals)
+		b.destinations(svc, ipvs.Masquarade, reals) // alternatives: ipvs.DirectRoute, ipvs.Tunnel
 
 		delete(existing, bar)
-
 	}
 
 	for _, svc := range existing {
 
-		as4 := svc.Address.As4()
-		ip4 := net.IPv4(as4[0], as4[1], as4[2], as4[3])
-
 		if b.ipset != "" {
-			p := uint8(svc.Protocol)
-
-			ipsetgo.Del(b.ipset, &ipsetgo.Entry{
-				IP:       ip4,
-				Protocol: &p,
-				Port:     &svc.Port,
-			})
+			ipsetgo.Del(b.ipset, ipsetEntry(svc.Address.As4(), svc.Port, uint8(svc.Protocol)))
 		}
-
-		//ipConfig := &netlink.Addr{IPNet: &net.IPNet{
-		//	IP:   ip4,
-		//	Mask: net.CIDRMask(32, 32),
-		//}}
-		//netlink.AddrDel(b.link, ipConfig)
 
 		if err = b.ipvs.RemoveService(svc); err != nil {
 			log.Println("failed removing Service in IPVS", err)
 		}
 	}
+
+	// add service IP addresses to interface
+	for v, _ := range vips {
+		netlink.AddrAdd(b.link, netlinkAddr(v))
+		delete(b.vips, v) // ensure address doesn't get removed in next step
+	}
+
+	// remove any addresses which are no longer active
+	for v, _ := range b.vips {
+		netlink.AddrDel(b.link, netlinkAddr(v))
+	}
+
+	b.vips = vips
 }
 
-func IPVS(s vc5.Scheduler, sticky bool) (string, ipvs.Flags) {
+func (f *balancer) destinations(svc ipvs.Service, ft ipvs.ForwardType, reals map[ipport]bool) {
+
+	vs := map[string]ipvs.DestinationExtended{}
+
+	dests, err := f.ipvs.Destinations(svc)
+
+	for _, dst := range dests {
+		addr := fmt.Sprintf("%s:%d", dst.Address, dst.Port)
+		vs[addr] = dst
+	}
+
+	for k, v := range reals {
+		addr := fmt.Sprintf("%s:%d", k.ip, k.port)
+
+		var weight uint32
+
+		if v {
+			weight = 1
+		}
+
+		dst := ipvs.Destination{
+			Address:   netip.AddrFrom4(k.ip),
+			FwdMethod: ft,
+			Weight:    weight,
+			Port:      k.port,
+			Family:    ipvs.INET,
+		}
+
+		if d, ok := vs[addr]; ok {
+
+			if d.Destination != dst {
+				if err = f.ipvs.UpdateDestination(svc, dst); err != nil {
+					log.Println("destination update failed", addr)
+				}
+			}
+
+		} else {
+			if err = f.ipvs.CreateDestination(svc, dst); err != nil {
+				log.Println("error creating destination:", addr, err)
+			}
+		}
+
+		delete(vs, addr)
+	}
+
+	for _, dst := range vs {
+		f.ipvs.RemoveDestination(svc, dst.Destination)
+	}
+}
+
+func ipvsService(service vc5.Service) ipvs.Service {
+	name, flags := ipvsScheduler(service.Scheduler, service.Sticky)
+
+	return ipvs.Service{
+		Address:   netip.AddrFrom4(service.Address),
+		Netmask:   netmask.MaskFrom4([4]byte{255, 255, 255, 255}),
+		Family:    ipvs.INET,
+		Protocol:  ipvs.Protocol(service.Protocol),
+		Port:      service.Port,
+		Scheduler: name,
+		Flags:     flags,
+	}
+
+}
+
+func netlinkAddr(i IP4) *netlink.Addr {
+	return &netlink.Addr{IPNet: &net.IPNet{
+		IP:   net.IPv4(i[0], i[1], i[2], i[3]),
+		Mask: net.CIDRMask(32, 32),
+	}}
+}
+
+func ipsetEntry(ip IP4, port uint16, protocol uint8) *ipsetgo.Entry {
+	return &ipsetgo.Entry{
+		IP:       net.IPv4(ip[0], ip[1], ip[2], ip[3]),
+		Protocol: &protocol,
+		Port:     &port,
+	}
+}
+
+func ipvsScheduler(s vc5.Scheduler, sticky bool) (string, ipvs.Flags) {
 	// rr    - Round Robin
 	// wrr   - Weighted Round Robin
 	// lc    - Least-Connection
