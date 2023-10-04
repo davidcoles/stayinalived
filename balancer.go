@@ -12,7 +12,7 @@ import (
 
 	"github.com/cloudflare/ipvs"
 	"github.com/cloudflare/ipvs/netmask"
-	ipsetgo "github.com/lrh3321/ipset-go"
+	"github.com/lrh3321/ipset-go"
 	"github.com/vishvananda/netlink"
 )
 
@@ -32,15 +32,15 @@ type ipport struct {
 	port uint16
 }
 
-func New(ipset, iface string) (*balancer, error) {
+func New(set, iface string) (*balancer, error) {
 	vs, err := ipvs.New()
 
 	if err != nil {
 		return nil, err
 	}
 
-	if ipset != "" {
-		ipsetgo.Flush(ipset)
+	if set != "" {
+		ipset.Flush(set)
 	}
 
 	link, err := netlink.LinkByName(iface)
@@ -50,12 +50,13 @@ func New(ipset, iface string) (*balancer, error) {
 
 	return &balancer{
 		ipvs:  vs,
-		ipset: ipset,
+		ipset: set,
 		link:  link,
 	}, nil
 }
 
-func (f *balancer) Close() {
+func (b *balancer) Close() {
+	close(b.c)
 }
 
 func (b *balancer) Status() vc5.Healthchecks {
@@ -93,55 +94,31 @@ func (b *balancer) Stats() (vc5.Counter, map[vc5.Target]vc5.Counter) {
 	vs := map[string]vc5.Counter{}
 	ret := map[vc5.Target]vc5.Counter{}
 
-	services, err := b.ipvs.Services()
-
-	if err != nil {
-		return global, ret
-	}
-
+	services, _ := b.ipvs.Services()
 	for _, svc := range services {
-		switch svc.Protocol {
-		case ipvs.TCP:
-		case ipvs.UDP:
-		default:
-			continue
-		}
-
 		s := svc.Service
 
-		dests, _ := b.ipvs.Destinations(s)
+		destinations, _ := b.ipvs.Destinations(s)
+		for _, d := range destinations {
 
-		for _, dst := range dests {
-
-			d := dst.Destination
-
-			addr := fmt.Sprintf("%s:%d:%s:%s", s.Address, s.Port, s.Protocol, d.Address)
-
-			c := dst.Stats64
-
+			addr := fmt.Sprintf("%s:%d:%d:%s", s.Address, s.Port, s.Protocol, d.Destination.Address)
 			vs[addr] = vc5.Counter{
-				Octets:  c.OutgoingBytes,
-				Packets: c.OutgoingPackets,
+				Octets:  d.Stats64.OutgoingBytes,
+				Packets: d.Stats64.OutgoingPackets,
 			}
 		}
 	}
 
-	for svc, service := range b.config.Services__() {
-		vip := svc.VIP
-		l4 := svc.L4()
-		for _, real := range service.Reals() {
-			rip := real.RIP
+	services_, _ := b.config.Services()
+	for _, s := range services_ {
 
-			proto := ipvs.TCP
+		destinations, _ := b.config.Destinations(s)
+		for _, d := range destinations {
 
-			if l4.Protocol {
-				proto = ipvs.UDP
-			}
-
-			addr := fmt.Sprintf("%s:%d:%s:%s", vip, l4.Port, proto, rip)
+			addr := fmt.Sprintf("%s:%d:%d:%s", s.Address, s.Port, s.Protocol, d.Address)
 
 			if c, ok := vs[addr]; ok {
-				t := Target{VIP: vip, RIP: rip, Port: l4.Port, Protocol: l4.Protocol.Number()}
+				t := Target{VIP: s.Address, RIP: d.Address, Port: s.Port, Protocol: s.Protocol}
 				ret[t] = c
 				global.Add(c)
 			}
@@ -192,7 +169,7 @@ func (b *balancer) configure(config *vc5.Healthchecks) {
 		vips[vip] = true
 
 		if b.ipset != "" {
-			ipsetgo.Add(b.ipset, ipsetEntry(vip, port, protocol))
+			ipset.Add(b.ipset, ipsetEntry(vip, port, protocol))
 		}
 
 		svc := ipvsService(service)
@@ -242,7 +219,7 @@ func (b *balancer) configure(config *vc5.Healthchecks) {
 	for _, svc := range existing {
 
 		if b.ipset != "" {
-			ipsetgo.Del(b.ipset, ipsetEntry(svc.Address.As4(), svc.Port, uint8(svc.Protocol)))
+			ipset.Del(b.ipset, ipsetEntry(svc.Address.As4(), svc.Port, uint8(svc.Protocol)))
 		}
 
 		if err = b.ipvs.RemoveService(svc); err != nil {
@@ -336,8 +313,8 @@ func netlinkAddr(i IP4) *netlink.Addr {
 	}}
 }
 
-func ipsetEntry(ip IP4, port uint16, protocol uint8) *ipsetgo.Entry {
-	return &ipsetgo.Entry{
+func ipsetEntry(ip IP4, port uint16, protocol uint8) *ipset.Entry {
+	return &ipset.Entry{
 		IP:       net.IPv4(ip[0], ip[1], ip[2], ip[3]),
 		Protocol: &protocol,
 		Port:     &port,

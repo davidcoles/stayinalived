@@ -38,7 +38,7 @@ type Balancer = vc5.Balancer
 
 var logger *Logger
 
-var ipset = flag.String("s", "", "ipset to add/delete IP/port to (type hash:ip,port)")
+var set = flag.String("s", "", "ipset to add/delete IP/port to (type hash:ip,port)")
 var iface = flag.String("i", "lo", "interface to add VIPs to")
 var root = flag.String("r", "", "webserver root directory")
 var websrv = flag.String("w", ":9999", "webserver address:port to listen on")
@@ -83,7 +83,7 @@ func main() {
 		log.Fatal(err)
 	}
 
-	balancer, err := New(*ipset, *iface)
+	balancer, err := New(*set, *iface)
 
 	if err != nil {
 		log.Fatalf("balancer: %v", err)
