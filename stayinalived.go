@@ -23,7 +23,6 @@ import (
 
 TDOD:
 
-* remove unused ip addresses from interface
 * expiry for ipset + periodic updates
 
 */
@@ -96,6 +95,8 @@ func main() {
 		Communities: conf.RHI.Communities(),
 		Peers:       conf.RHI.Peers,
 		Listen:      conf.RHI.Listen,
+		MED:         conf.RHI.MED,
+		LocalPref:   conf.RHI.Local_Pref,
 	}
 
 	if !pool.Open() {
@@ -119,15 +120,14 @@ func main() {
 	}()
 
 	sig := make(chan os.Signal)
-	//signal.Notify(sig, syscall.SIGUSR2, syscall.SIGQUIT)
-	signal.Notify(sig, syscall.SIGINT)
+	signal.Notify(sig, syscall.SIGINT, syscall.SIGUSR2)
 	//signal.Notify(sig) // all the signals!
 
 	go func() {
 		for {
 			s := <-sig
 			switch s {
-			case syscall.SIGQUIT:
+			case syscall.SIGUSR2:
 				fallthrough
 			case syscall.SIGINT:
 				log.Println("RELOAD")
