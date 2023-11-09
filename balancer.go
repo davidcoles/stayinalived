@@ -333,6 +333,7 @@ func ipsetEntry(ip IP4, port uint16, protocol uint8) *ipset.Entry {
 		IP:       net.IPv4(ip[0], ip[1], ip[2], ip[3]),
 		Protocol: &protocol,
 		Port:     &port,
+		Replace:  true,
 	}
 }
 
