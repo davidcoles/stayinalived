@@ -7,6 +7,7 @@ import (
 	"net"
 	"net/netip"
 	"sync"
+	"time"
 
 	"github.com/davidcoles/vc5"
 
@@ -24,7 +25,7 @@ type balancer struct {
 	probes *vc5.Probes
 	mutex  sync.Mutex
 	vips   map[IP4]bool
-	c      chan *vc5.Healthchecks
+	done   chan bool
 }
 
 type ipport struct {
@@ -56,7 +57,8 @@ func New(set, iface string) (*balancer, error) {
 }
 
 func (b *balancer) Close() {
-	close(b.c)
+	//close(b.c)
+	close(b.done)
 }
 
 func (b *balancer) Status() vc5.Healthchecks {
@@ -65,16 +67,13 @@ func (b *balancer) Status() vc5.Healthchecks {
 }
 
 func (b *balancer) Start(ip string, hc *vc5.Healthchecks) error {
-	b.c = make(chan *vc5.Healthchecks, 100)
+	b.done = make(chan bool)
 	b.vips = map[IP4]bool{}
 	b.probes = &vc5.Probes{}
 	b.probes.Start(ip)
 	b.Configure(hc)
+	go b.background(b.done)
 	return nil
-}
-
-func (b *balancer) Stop() {
-	close(b.c)
 }
 
 func (b *balancer) Checker() vc5.Checker {
@@ -83,6 +82,22 @@ func (b *balancer) Checker() vc5.Checker {
 
 func (b *balancer) Configure(config *vc5.Healthchecks) {
 	b.configure(config)
+}
+
+func (b *balancer) background(done chan bool) {
+	ticker := time.NewTicker(1 * time.Minute)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ticker.C: // preiodically refresh in case VIPs get removed from dummy interface (eg. by netplan apply)
+			b.mutex.Lock()
+			config := b.config // re-use current config
+			b.mutex.Unlock()
+			b.configure(config)
+		case <-b.done:
+			return
+		}
+	}
 }
 
 /********************************************************************************/
