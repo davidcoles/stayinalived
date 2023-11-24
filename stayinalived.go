@@ -16,7 +16,7 @@ import (
 	"time"
 
 	"github.com/davidcoles/vc5"
-	"github.com/davidcoles/vc5/bgp4"
+	"github.com/davidcoles/vc5/bgp"
 )
 
 /*
@@ -88,20 +88,27 @@ func main() {
 		log.Fatalf("balancer: %v", err)
 	}
 
-	pool := bgp4.Pool{
-		Address:     addr,
-		ASN:         conf.RHI.AS_Number,
-		HoldTime:    conf.RHI.Hold_Time,
-		Communities: conf.RHI.Communities(),
-		Peers:       conf.RHI.Peers,
-		Listen:      conf.RHI.Listen,
-		MED:         conf.RHI.MED,
-		LocalPref:   conf.RHI.Local_Pref,
-	}
+	/*
+			pool := bgp4.Pool{
+				Address:     addr,
+				ASN:         conf.RHI.AS_Number,
+				HoldTime:    conf.RHI.Hold_Time,
+				Communities: conf.RHI.Communities(),
+				Peers:       conf.RHI.Peers,
+				Listen:      conf.RHI.Listen,
+				MED:         conf.RHI.MED,
+				LocalPref:   conf.RHI.Local_Pref,
+			}
 
-	if !pool.Open() {
-		log.Fatal("BGP peer initialisation failed")
-	}
+
+		if !pool.Open() {
+			log.Fatal("BGP peer initialisation failed")
+		}
+	*/
+
+	pool := bgp4.NewPool(addr, conf.BGP, nil)
+
+	fmt.Println(conf.BGP)
 
 	director := &vc5.Director{
 		Balancer: balancer,
@@ -114,10 +121,12 @@ func main() {
 		log.Fatal(err)
 	}
 
-	go func() {
-		time.Sleep(time.Duration(conf.Learn) * time.Second)
-		pool.Start()
-	}()
+	/*
+		go func() {
+			time.Sleep(time.Duration(conf.Learn) * time.Second)
+			pool.Start()
+		}()
+	*/
 
 	sig := make(chan os.Signal)
 	signal.Notify(sig, syscall.SIGINT, syscall.SIGUSR2)
@@ -142,8 +151,10 @@ func main() {
 						log.Println(err)
 					} else {
 						hc = h
-						pool.Peer(conf.RHI.Peers)
+						//pool.Peer(conf.RHI.Peers)
 						director.Update(hc)
+
+						pool.Configure(conf.BGP)
 					}
 				}
 			}
@@ -162,7 +173,21 @@ func main() {
 			t = time.Now()
 			stats = s
 			if time.Now().Sub(start) > (time.Duration(conf.Learn) * time.Second) {
-				pool.NLRI(s.RHI)
+				//pool.NLRI(s.RHI)
+
+				rhi := s.RHI
+
+				var rib []bgp4.IP
+				for k, v := range rhi {
+
+					var ip bgp4.IP4
+
+					if v && ip.UnmarshalText([]byte(k)) == nil {
+						rib = append(rib, ip)
+					}
+				}
+
+				pool.RIB(rib)
 			}
 			time.Sleep(3 * time.Second)
 		}
