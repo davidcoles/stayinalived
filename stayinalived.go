@@ -46,6 +46,8 @@ var level = flag.Uint("l", LOG_ERR, "debug level level")
 
 func main() {
 
+	var rib []IP
+
 	flag.Parse()
 	args := flag.Args()
 
@@ -173,21 +175,10 @@ func main() {
 			t = time.Now()
 			stats = s
 			if time.Now().Sub(start) > (time.Duration(conf.Learn) * time.Second) {
-				//pool.NLRI(s.RHI)
-
-				rhi := s.RHI
-
-				var rib []bgp4.IP
-				for k, v := range rhi {
-
-					var ip bgp4.IP4
-
-					if v && ip.UnmarshalText([]byte(k)) == nil {
-						rib = append(rib, ip)
-					}
+				var changed bool
+				if rib, changed = s.RIBChanged(rib); changed {
+					pool.RIB(rib)
 				}
-
-				pool.RIB(rib)
 			}
 			time.Sleep(3 * time.Second)
 		}
