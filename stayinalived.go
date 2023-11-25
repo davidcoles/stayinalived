@@ -90,25 +90,7 @@ func main() {
 		log.Fatalf("balancer: %v", err)
 	}
 
-	/*
-			pool := bgp4.Pool{
-				Address:     addr,
-				ASN:         conf.RHI.AS_Number,
-				HoldTime:    conf.RHI.Hold_Time,
-				Communities: conf.RHI.Communities(),
-				Peers:       conf.RHI.Peers,
-				Listen:      conf.RHI.Listen,
-				MED:         conf.RHI.MED,
-				LocalPref:   conf.RHI.Local_Pref,
-			}
-
-
-		if !pool.Open() {
-			log.Fatal("BGP peer initialisation failed")
-		}
-	*/
-
-	pool := bgp4.NewPool(addr, conf.BGP, nil)
+	pool := bgp.NewPool(addr, conf.BGP, nil)
 
 	fmt.Println(conf.BGP)
 
@@ -173,10 +155,12 @@ func main() {
 			s := getStats(balancer)
 			s.Sub(stats, time.Now().Sub(t))
 			t = time.Now()
+			s.BGPStatus = pool.Status()
 			stats = s
 			if time.Now().Sub(start) > (time.Duration(conf.Learn) * time.Second) {
-				var changed bool
-				if rib, changed = s.RIBChanged(rib); changed {
+				fmt.Println()
+				var differ bool
+				if rib, differ = s.RIBDiffer(rib); differ {
 					pool.RIB(rib)
 				}
 			}

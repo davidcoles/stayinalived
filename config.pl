@@ -26,11 +26,11 @@ if(1) {
     $json->{'bgp'} = new_rhi($conf->{'rhi'}, $conf->{'prefixes'});
     
     $conf->{'learn'}+=0 if defined $conf->{'learn'};
-    $conf->{'rhi'}->{'listen'} = $conf->{'rhi'}->{'listen'} =~ /^(yes|true|on|y)$/i ? JSON::true : JSON::false;
-    $conf->{'rhi'}->{'as_number'}+= 0 if defined $conf->{'rhi'}->{'as_number'};
-    $conf->{'rhi'}->{'hold_time'}+= 0 if defined $conf->{'rhi'}->{'hold_time'};
-    $conf->{'rhi'}->{'local_pref'}+= 0 if defined $conf->{'rhi'}->{'local_pref'};        
-    $conf->{'rhi'}->{'med'}+= 0 if defined $conf->{'rhi'}->{'med'};
+    #$conf->{'rhi'}->{'listen'} = $conf->{'rhi'}->{'listen'} =~ /^(yes|true|on|y)$/i ? JSON::true : JSON::false;
+    #$conf->{'rhi'}->{'as_number'}+= 0 if defined $conf->{'rhi'}->{'as_number'};
+    #$conf->{'rhi'}->{'hold_time'}+= 0 if defined $conf->{'rhi'}->{'hold_time'};
+    #$conf->{'rhi'}->{'local_pref'}+= 0 if defined $conf->{'rhi'}->{'local_pref'};        
+    #$conf->{'rhi'}->{'med'}+= 0 if defined $conf->{'rhi'}->{'med'};
     
 
     #foreach(qw(learn multicast rhi webserver interfaces vlans)) {
