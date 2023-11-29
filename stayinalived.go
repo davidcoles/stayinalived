@@ -158,7 +158,6 @@ func main() {
 			s.BGPStatus = pool.Status()
 			stats = s
 			if time.Now().Sub(start) > (time.Duration(conf.Learn) * time.Second) {
-				fmt.Println()
 				var differ bool
 				if rib, differ = s.RIBDiffer(rib); differ {
 					pool.RIB(rib)
