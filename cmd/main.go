@@ -101,6 +101,7 @@ func main() {
 		Logger: logs.sub("director"),
 		Balancer: &Balancer{
 			Client: client,
+			Logger: logs.sub("ipvs"),
 		},
 	}
 
@@ -213,21 +214,27 @@ func main() {
 		w.Write([]byte("\n"))
 	})
 
-	/*
-		http.HandleFunc("/prefixes.json", func(w http.ResponseWriter, r *http.Request) {
-			t := time.Now()
-			p := client.Prefixes()
-			fmt.Println(time.Now().Sub(t))
-			js, _ := json.Marshal(&p)
-			if err != nil {
-				w.WriteHeader(http.StatusInternalServerError)
-				return
-			}
-			w.Header().Set("Content-Type", "application/json")
-			w.Write(js)
-			w.Write([]byte("\n"))
-		})
-	*/
+	// Remove this if migrating to a different load balancing engine
+	http.HandleFunc("/lb.json", func(w http.ResponseWriter, r *http.Request) {
+		var ret []interface{}
+		type status struct {
+			Service      lb.ServiceExtended
+			Destinations []lb.DestinationExtended
+		}
+		svcs, _ := client.Services()
+		for _, se := range svcs {
+			dsts, _ := client.Destinations(se.Service)
+			ret = append(ret, status{Service: se, Destinations: dsts})
+		}
+		js, err := json.MarshalIndent(&ret, " ", " ")
+		if err != nil {
+			w.WriteHeader(http.StatusInternalServerError)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.Write(js)
+		w.Write([]byte("\n"))
+	})
 
 	http.HandleFunc("/config.json", func(w http.ResponseWriter, r *http.Request) {
 		js, err := json.MarshalIndent(config, " ", " ")
@@ -250,29 +257,6 @@ func main() {
 		w.Write(js)
 		w.Write([]byte("\n"))
 	})
-
-	/*
-		http.HandleFunc("/xvs.json", func(w http.ResponseWriter, r *http.Request) {
-			var ret []interface{}
-			type status struct {
-				Service      lb.ServiceExtended
-				Destinations []lb.DestinationExtended
-			}
-			svcs, _ := client.Services()
-			for _, se := range svcs {
-				dsts, _ := client.Destinations(se.Service)
-				ret = append(ret, status{Service: se, Destinations: dsts})
-			}
-			js, err := json.MarshalIndent(&ret, " ", " ")
-			if err != nil {
-				w.WriteHeader(http.StatusInternalServerError)
-				return
-			}
-			w.Header().Set("Content-Type", "application/json")
-			w.Write(js)
-			w.Write([]byte("\n"))
-		})
-	*/
 
 	http.HandleFunc("/status.json", func(w http.ResponseWriter, r *http.Request) {
 		mutex.Lock()
@@ -342,31 +326,6 @@ func main() {
 	}
 }
 
-func (s *Summary) update(c Client, t uint64) Summary {
-	o := *s
-
-	s.summary(c)
-
-	s.Uptime = t
-	s.time = time.Now()
-
-	if o.time.Unix() != 0 {
-		diff := uint64(s.time.Sub(o.time) / time.Millisecond)
-
-		if diff != 0 {
-			s.DroppedPerSecond = (1000 * (s.Dropped - o.Dropped)) / diff
-			s.BlockedPerSecond = (1000 * (s.Blocked - o.Blocked)) / diff
-			s.NotQueuedPerSecond = (1000 * (s.NotQueued - o.NotQueued)) / diff
-
-			s.PacketsPerSecond = (1000 * (s.Packets - o.Packets)) / diff
-			s.OctetsPerSecond = (1000 * (s.Octets - o.Octets)) / diff
-			s.FlowsPerSecond = (1000 * (s.Flows - o.Flows)) / diff
-		}
-	}
-
-	return *s
-}
-
 func serviceStatus(config *Config, client Client, director *cue.Director, old map[Key]Stats) (map[VIP][]Serv, map[Key]Stats, uint64) {
 
 	var current uint64
@@ -376,7 +335,6 @@ func serviceStatus(config *Config, client Client, director *cue.Director, old ma
 
 	for _, svc := range director.Status() {
 
-		//xs := lb.Service{Address: svc.Address, Port: svc.Port, Protocol: lb.Protocol(svc.Protocol)}
 		xs := ipvsService(svc)
 		xse, err := client.Service(xs)
 
@@ -442,4 +400,45 @@ func serviceStatus(config *Config, client Client, director *cue.Director, old ma
 	}
 
 	return status, stats, current
+}
+
+func (s *Summary) summary(c Client) {
+	var u Stats
+
+	services, _ := c.Services()
+
+	for _, s := range services {
+		u.Octets += s.Stats.IncomingBytes
+		u.Packets += s.Stats.IncomingPackets
+		u.Flows += s.Stats.Connections
+	}
+
+	s.Octets = u.Octets
+	s.Packets = u.Packets
+	s.Flows = u.Flows
+}
+
+func (s *Stats) update(u lb.Stats) Stats {
+	o := *s
+
+	//s.Octets = u.IncomingBytes
+	//s.Packets = u.IncomingPackets
+
+	s.Octets = u.OutgoingBytes
+	s.Packets = u.OutgoingPackets
+	s.Flows = u.Connections
+	//s.Current = u.Current
+	s.time = time.Now()
+
+	if o.time.Unix() != 0 {
+		diff := uint64(s.time.Sub(o.time) / time.Millisecond)
+
+		if diff != 0 {
+			s.PacketsPerSecond = (1000 * (s.Packets - o.Packets)) / diff
+			s.OctetsPerSecond = (1000 * (s.Octets - o.Octets)) / diff
+			s.FlowsPerSecond = (1000 * (s.Flows - o.Flows)) / diff
+		}
+	}
+
+	return *s
 }

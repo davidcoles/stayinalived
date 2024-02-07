@@ -19,11 +19,9 @@
 package main
 
 import (
-	//"errors"
+	"encoding/json"
 	"fmt"
-	"log"
 	"net/netip"
-	"time"
 
 	"github.com/cloudflare/ipvs"
 	"github.com/cloudflare/ipvs/netmask"
@@ -38,6 +36,7 @@ type tuple struct {
 
 type Balancer struct {
 	Client ipvs.Client
+	Logger Logger
 }
 
 type Client = ipvs.Client
@@ -46,7 +45,11 @@ func NewClient() (ipvs.Client, error) {
 	return ipvs.New()
 }
 
+func (b *Balancer) DEBUG(s string, a ...any) { b.Logger.NOTICE(s, a...) }
+func (b *Balancer) ERR(s string, a ...any)   { b.Logger.ERR(s, a...) }
+
 func (b *Balancer) Configure(services []cue.Service) error {
+	F := "service"
 
 	target := map[tuple]cue.Service{}
 
@@ -61,29 +64,27 @@ func (b *Balancer) Configure(services []cue.Service) error {
 
 		if t, wanted := target[key]; !wanted {
 
-			fmt.Println("REMOVING", s.Service)
+			b.DEBUG(F, "REMOVING", s.Service)
 
 			if err := b.Client.RemoveService(s.Service); err != nil {
-				// do something
-				fmt.Println("ERROR", s.Service, err)
+				b.ERR(F, "ERROR", s.Service, err)
 			}
+
 		} else {
 
 			service := ipvsService(t)
 
 			if service != s.Service {
 
-				fmt.Println("UPDATING", s.Service, service)
+				b.DEBUG(F, "UPDATING", s.Service, service)
 
 				if err := b.Client.UpdateService(service); err != nil {
-					// do something
-					fmt.Println("ERROR", s.Service, err)
+					b.ERR(F, "ERROR", s.Service, err)
 				}
 			}
 
-			if err := b.desinations(s.Service, t.Destinations); err != nil {
-				// do something
-				fmt.Println("ERROR", s.Service, err)
+			if err := b.destinations(s.Service, t.Destinations); err != nil {
+				b.ERR(F, "ERROR", s.Service, err)
 			}
 
 			delete(target, key)
@@ -93,15 +94,15 @@ func (b *Balancer) Configure(services []cue.Service) error {
 	for _, t := range target {
 		service := ipvsService(t)
 
-		fmt.Println("CREATING", service)
+		b.DEBUG(F, "CREATING", service)
 
 		if err := b.Client.CreateService(service); err != nil {
-			fmt.Println("ERROR", service, err)
+			b.ERR(F, "ERROR", service, err)
 			continue
 		}
 
-		if err = b.foobar(service, t.Destinations); err != nil {
-			// do something
+		if err := b.destinations(service, t.Destinations); err != nil {
+			b.ERR(F, "ERROR", service, err)
 		}
 	}
 
@@ -109,6 +110,8 @@ func (b *Balancer) Configure(services []cue.Service) error {
 }
 
 func (b *Balancer) destinations(service ipvs.Service, destinations []cue.Destination) error {
+
+	F := "destination"
 
 	target := map[ipport]cue.Destination{}
 
@@ -119,7 +122,7 @@ func (b *Balancer) destinations(service ipvs.Service, destinations []cue.Destina
 	dsts, err := b.Client.Destinations(service)
 
 	if err != nil {
-		// do something
+		b.ERR(F, "ERROR", service, err)
 	}
 
 	for _, d := range dsts {
@@ -128,24 +131,22 @@ func (b *Balancer) destinations(service ipvs.Service, destinations []cue.Destina
 
 		if t, wanted := target[key]; !wanted {
 
-			fmt.Println("REMOVING", d)
+			b.DEBUG(F, "REMOVING", d)
 
 			if err = b.Client.RemoveDestination(service, d.Destination); err != nil {
-				// do something
-				fmt.Println("ERROR", service, d.Destination)
+				b.ERR(F, "ERROR", service, d.Destination)
 			}
 
 		} else {
-			// compare/update
+
 			destination := ipvsDestination(t)
 
 			if destination != d.Destination {
 
-				fmt.Println("UPDATING", d)
+				b.DEBUG(F, "UPDATING", svc(service), dst(d.Destination), "to", dst(destination))
 
 				if err := b.Client.UpdateDestination(service, destination); err != nil {
-					// do something
-					fmt.Println("ERROR", service, destination)
+					b.ERR(F, "ERROR", service, destination)
 				}
 			}
 
@@ -155,17 +156,28 @@ func (b *Balancer) destinations(service ipvs.Service, destinations []cue.Destina
 
 	for _, d := range target {
 
-		fmt.Println("CREATING", d)
+		b.DEBUG(F, "CREATING", d)
 
 		destination := ipvsDestination(d)
 
 		if err := b.Client.CreateDestination(service, destination); err != nil {
-			fmt.Println("ERROR", service, destination)
-			// do something
+			b.ERR("ERROR", service, destination)
 		}
 	}
 
 	return nil
+}
+
+func svc(s ipvs.Service) string {
+	js, _ := json.Marshal(s)
+	return string(js)
+	return fmt.Sprint(s)
+}
+
+func dst(d ipvs.Destination) string {
+	js, _ := json.Marshal(d)
+	return string(js)
+	return fmt.Sprint(d)
 }
 
 func ipvsService(s cue.Service) ipvs.Service {
@@ -200,45 +212,4 @@ func ipvsDestination(d cue.Destination) ipvs.Destination {
 		//TunnelPort:  uint16,
 		//TunnelFlags: TunnelFlags,
 	}
-}
-
-func (s *Summary) summary(c Client) {
-	var u Stats
-
-	services, _ := c.Services()
-
-	for _, s := range services {
-		u.Octets += s.Stats.IncomingBytes
-		u.Packets += s.Stats.IncomingPackets
-		u.Flows += s.Stats.Connections
-	}
-
-	s.Octets = u.Octets
-	s.Packets = u.Packets
-	s.Flows = u.Flows
-}
-
-func (s *Stats) update(u ipvs.Stats) Stats {
-	o := *s
-
-	//s.Octets = u.IncomingBytes
-	//s.Packets = u.IncomingPackets
-
-	s.Octets = u.OutgoingBytes
-	s.Packets = u.OutgoingPackets
-	s.Flows = u.Connections
-	//s.Current = u.Current
-	s.time = time.Now()
-
-	if o.time.Unix() != 0 {
-		diff := uint64(s.time.Sub(o.time) / time.Millisecond)
-
-		if diff != 0 {
-			s.PacketsPerSecond = (1000 * (s.Packets - o.Packets)) / diff
-			s.OctetsPerSecond = (1000 * (s.Octets - o.Octets)) / diff
-			s.FlowsPerSecond = (1000 * (s.Flows - o.Flows)) / diff
-		}
-	}
-
-	return *s
 }

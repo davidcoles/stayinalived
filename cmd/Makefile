@@ -19,7 +19,6 @@ pre-commit:
 	if grep '^replace' go.mod; then false; fi
 
 
-# balancer.go  config.go  elastic.go  logger.go  main.go  prometheus.go  stats.go
 foo:
 	rsync -av --exclude=main.go --exclude=balancer.go --exclude=xvs.go ../../vc5/cmd/*.go .
 	rsync -av --delete ../../vc5/cmd/static/ static/
