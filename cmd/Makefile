@@ -9,7 +9,7 @@ config.yaml:
 	if [ ! -e $@ ]; then ./config.pl -x >$@; fi
 
 config.json: config.pl config.yaml
-	./config.pl config.yaml >$@- && mv $@- $@
+	./config.pl -n config.yaml >$@- && mv $@- $@
 
 clean:
 	rm -f stayinalived config.json

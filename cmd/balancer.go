@@ -20,6 +20,7 @@ package main
 
 import (
 	"encoding/json"
+	//"errors"
 	"fmt"
 	"net/netip"
 
@@ -49,7 +50,6 @@ func (b *Balancer) DEBUG(s string, a ...any) { b.Logger.NOTICE(s, a...) }
 func (b *Balancer) ERR(s string, a ...any)   { b.Logger.ERR(s, a...) }
 
 func (b *Balancer) Configure(services []cue.Service) error {
-	F := "service"
 
 	target := map[tuple]cue.Service{}
 
@@ -64,10 +64,10 @@ func (b *Balancer) Configure(services []cue.Service) error {
 
 		if t, wanted := target[key]; !wanted {
 
-			b.DEBUG(F, "REMOVING", s.Service)
-
 			if err := b.Client.RemoveService(s.Service); err != nil {
-				b.ERR(F, "ERROR", s.Service, err)
+				b.ERR(logServRemove(s.Service).err(err))
+			} else {
+				b.DEBUG(logServRemove(s.Service).log())
 			}
 
 		} else {
@@ -76,42 +76,37 @@ func (b *Balancer) Configure(services []cue.Service) error {
 
 			if service != s.Service {
 
-				b.DEBUG(F, "UPDATING", s.Service, service)
-
 				if err := b.Client.UpdateService(service); err != nil {
-					b.ERR(F, "ERROR", s.Service, err)
+					b.ERR(logServUpdate(service, s.Service).err(err))
+				} else {
+					b.DEBUG(logServUpdate(service, s.Service).log())
 				}
 			}
 
-			if err := b.destinations(s.Service, t.Destinations); err != nil {
-				b.ERR(F, "ERROR", s.Service, err)
-			}
+			b.destinations(s.Service, t.Destinations)
 
 			delete(target, key)
 		}
 	}
 
 	for _, t := range target {
+
 		service := ipvsService(t)
 
-		b.DEBUG(F, "CREATING", service)
-
 		if err := b.Client.CreateService(service); err != nil {
-			b.ERR(F, "ERROR", service, err)
+			b.ERR(logServCreate(service).err(err))
 			continue
+		} else {
+			b.DEBUG(logServCreate(service).log())
 		}
 
-		if err := b.destinations(service, t.Destinations); err != nil {
-			b.ERR(F, "ERROR", service, err)
-		}
+		b.destinations(service, t.Destinations)
 	}
 
 	return nil
 }
 
-func (b *Balancer) destinations(service ipvs.Service, destinations []cue.Destination) error {
-
-	F := "destination"
+func (b *Balancer) destinations(s ipvs.Service, destinations []cue.Destination) error {
 
 	target := map[ipport]cue.Destination{}
 
@@ -119,11 +114,12 @@ func (b *Balancer) destinations(service ipvs.Service, destinations []cue.Destina
 		target[ipport{Addr: d.Address, Port: d.Port}] = d
 	}
 
-	dsts, err := b.Client.Destinations(service)
+	dsts, err := b.Client.Destinations(s)
 
-	if err != nil {
-		b.ERR(F, "ERROR", service, err)
-	}
+	// above errors with "file does not exist" when no destinations present - which seems unhelpful
+	//if err != nil {
+	//	b.ERR(logServQuery(s).err(err))
+	//}
 
 	for _, d := range dsts {
 
@@ -131,10 +127,10 @@ func (b *Balancer) destinations(service ipvs.Service, destinations []cue.Destina
 
 		if t, wanted := target[key]; !wanted {
 
-			b.DEBUG(F, "REMOVING", d)
-
-			if err = b.Client.RemoveDestination(service, d.Destination); err != nil {
-				b.ERR(F, "ERROR", service, d.Destination)
+			if err = b.Client.RemoveDestination(s, d.Destination); err != nil {
+				b.ERR(logDestRemove(s, d.Destination).err(err))
+			} else {
+				b.DEBUG(logDestRemove(s, d.Destination).log())
 			}
 
 		} else {
@@ -143,10 +139,10 @@ func (b *Balancer) destinations(service ipvs.Service, destinations []cue.Destina
 
 			if destination != d.Destination {
 
-				b.DEBUG(F, "UPDATING", svc(service), dst(d.Destination), "to", dst(destination))
-
-				if err := b.Client.UpdateDestination(service, destination); err != nil {
-					b.ERR(F, "ERROR", service, destination)
+				if err := b.Client.UpdateDestination(s, destination); err != nil {
+					b.ERR(logDestUpdate(s, destination, d.Destination).err(err))
+				} else {
+					b.DEBUG(logDestUpdate(s, destination, d.Destination).log())
 				}
 			}
 
@@ -156,28 +152,17 @@ func (b *Balancer) destinations(service ipvs.Service, destinations []cue.Destina
 
 	for _, d := range target {
 
-		b.DEBUG(F, "CREATING", d)
-
 		destination := ipvsDestination(d)
+		//destination.Address = netip.MustParseAddr("10.99.99.99") // force errors to test
 
-		if err := b.Client.CreateDestination(service, destination); err != nil {
-			b.ERR("ERROR", service, destination)
+		if err := b.Client.CreateDestination(s, destination); err != nil {
+			b.ERR(logDestCreate(s, destination).err(err))
+		} else {
+			b.DEBUG(logDestCreate(s, destination).log())
 		}
 	}
 
 	return nil
-}
-
-func svc(s ipvs.Service) string {
-	js, _ := json.Marshal(s)
-	return string(js)
-	return fmt.Sprint(s)
-}
-
-func dst(d ipvs.Destination) string {
-	js, _ := json.Marshal(d)
-	return string(js)
-	return fmt.Sprint(d)
 }
 
 func ipvsService(s cue.Service) ipvs.Service {
@@ -213,3 +198,56 @@ func ipvsDestination(d cue.Destination) ipvs.Destination {
 		//TunnelFlags: TunnelFlags,
 	}
 }
+
+/**********************************************************************/
+// Logging
+/**********************************************************************/
+
+type dest = ipvs.Destination
+type serv = ipvs.Service
+
+func logServEvent(e string, s serv, p ...ipvs.Service) *LE {
+	kv := KV{"service": svc(s)}
+	if len(p) > 0 {
+		kv.add("previous", svc(p[0]))
+	}
+	return &LE{f: "service." + e, k: kv}
+}
+
+func logServQuery(s serv) *LE     { return logServEvent("query", s) }
+func logServCreate(s serv) *LE    { return logServEvent("create", s) }
+func logServRemove(s serv) *LE    { return logServEvent("remove", s) }
+func logServUpdate(s, p serv) *LE { return logServEvent("update", s, p) }
+
+func logDestEvent(e string, s ipvs.Service, d ipvs.Destination, p ...ipvs.Destination) *LE {
+	kv := KV{"service": svc(s), "destination": dst(d)}
+	if len(p) > 1 {
+		kv.add("previous", dst(p[0]))
+	}
+	return &LE{f: "destination." + e, k: kv}
+}
+
+func logDestCreate(s serv, d dest) *LE    { return logDestEvent("create", s, d) }
+func logDestRemove(s serv, d dest) *LE    { return logDestEvent("remove", s, d) }
+func logDestUpdate(s serv, d, p dest) *LE { return logDestEvent("update", s, d, p) }
+
+func svc(s ipvs.Service) string {
+	js, _ := json.Marshal(s)
+	return string(js)
+	return fmt.Sprint(s)
+}
+
+func dst(d ipvs.Destination) string {
+	js, _ := json.Marshal(d)
+	return string(js)
+	return fmt.Sprint(d)
+}
+
+type LE struct {
+	k KV
+	f string
+}
+
+func (l *LE) log() (string, KV)        { return l.f, l.k }
+func (l *LE) err(e error) (string, KV) { l.k.add("error", e.Error()); return l.log() }
+func (l *LE) add(k string, e any) *LE  { l.k[k] = e; return l }
