@@ -46,7 +46,7 @@ func NewClient() (ipvs.Client, error) {
 	return ipvs.New()
 }
 
-func (b *Balancer) DEBUG(s string, a ...any) { b.Logger.NOTICE(s, a...) }
+func (b *Balancer) DEBUG(s string, a ...any) { b.Logger.DEBUG(s, a...) }
 func (b *Balancer) ERR(s string, a ...any)   { b.Logger.ERR(s, a...) }
 
 func (b *Balancer) Configure(services []cue.Service) error {
