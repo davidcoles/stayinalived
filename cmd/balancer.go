@@ -46,8 +46,8 @@ func NewClient() (ipvs.Client, error) {
 	return ipvs.New()
 }
 
-func (b *Balancer) DEBUG(s string, a ...any) { b.Logger.DEBUG(s, a...) }
-func (b *Balancer) ERR(s string, a ...any)   { b.Logger.ERR(s, a...) }
+func (b *Balancer) INFO(s string, a ...any) { b.Logger.INFO(s, a...) }
+func (b *Balancer) ERR(s string, a ...any)  { b.Logger.ERR(s, a...) }
 
 func (b *Balancer) Configure(services []cue.Service) error {
 
@@ -67,7 +67,7 @@ func (b *Balancer) Configure(services []cue.Service) error {
 			if err := b.Client.RemoveService(s.Service); err != nil {
 				b.ERR(logServRemove(s.Service).err(err))
 			} else {
-				b.DEBUG(logServRemove(s.Service).log())
+				b.INFO(logServRemove(s.Service).log())
 			}
 
 		} else {
@@ -79,7 +79,7 @@ func (b *Balancer) Configure(services []cue.Service) error {
 				if err := b.Client.UpdateService(service); err != nil {
 					b.ERR(logServUpdate(service, s.Service).err(err))
 				} else {
-					b.DEBUG(logServUpdate(service, s.Service).log())
+					b.INFO(logServUpdate(service, s.Service).log())
 				}
 			}
 
@@ -97,7 +97,7 @@ func (b *Balancer) Configure(services []cue.Service) error {
 			b.ERR(logServCreate(service).err(err))
 			continue
 		} else {
-			b.DEBUG(logServCreate(service).log())
+			b.INFO(logServCreate(service).log())
 		}
 
 		b.destinations(service, t.Destinations)
@@ -130,7 +130,7 @@ func (b *Balancer) destinations(s ipvs.Service, destinations []cue.Destination) 
 			if err = b.Client.RemoveDestination(s, d.Destination); err != nil {
 				b.ERR(logDestRemove(s, d.Destination).err(err))
 			} else {
-				b.DEBUG(logDestRemove(s, d.Destination).log())
+				b.INFO(logDestRemove(s, d.Destination).log())
 			}
 
 		} else {
@@ -142,7 +142,7 @@ func (b *Balancer) destinations(s ipvs.Service, destinations []cue.Destination) 
 				if err := b.Client.UpdateDestination(s, destination); err != nil {
 					b.ERR(logDestUpdate(s, destination, d.Destination).err(err))
 				} else {
-					b.DEBUG(logDestUpdate(s, destination, d.Destination).log())
+					b.INFO(logDestUpdate(s, destination, d.Destination).log())
 				}
 			}
 
@@ -158,7 +158,7 @@ func (b *Balancer) destinations(s ipvs.Service, destinations []cue.Destination) 
 		if err := b.Client.CreateDestination(s, destination); err != nil {
 			b.ERR(logDestCreate(s, destination).err(err))
 		} else {
-			b.DEBUG(logDestCreate(s, destination).log())
+			b.INFO(logDestCreate(s, destination).log())
 		}
 	}
 
