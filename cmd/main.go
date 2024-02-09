@@ -408,15 +408,15 @@ func (s *Summary) summary(c Client) {
 	services, _ := c.Services()
 
 	for _, s := range services {
-		u.Octets += s.Stats.IncomingBytes
-		u.Packets += s.Stats.IncomingPackets
+		u.IngressOctets += s.Stats.IncomingBytes
+		u.IngressPackets += s.Stats.IncomingPackets
 		u.EgressOctets += s.Stats.OutgoingBytes
 		u.EgressPackets += s.Stats.OutgoingPackets
 		u.Flows += s.Stats.Connections
 	}
 
-	s.Octets = u.Octets
-	s.Packets = u.Packets
+	s.IngressOctets = u.IngressOctets
+	s.IngressPackets = u.IngressPackets
 	s.EgressOctets = u.EgressOctets
 	s.EgressPackets = u.EgressPackets
 	s.Flows = u.Flows
@@ -425,8 +425,8 @@ func (s *Summary) summary(c Client) {
 func (s *Stats) update(u lb.Stats) Stats {
 	o := *s
 
-	s.Octets = u.IncomingBytes
-	s.Packets = u.IncomingPackets
+	s.IngressOctets = u.IncomingBytes
+	s.IngressPackets = u.IncomingPackets
 	s.EgressOctets = u.OutgoingBytes
 	s.EgressPackets = u.OutgoingPackets
 	s.Flows = u.Connections
@@ -439,8 +439,8 @@ func (s *Stats) update(u lb.Stats) Stats {
 		if diff != 0 {
 			s.EgressPacketsPerSecond = (1000 * (s.EgressPackets - o.EgressPackets)) / diff
 			s.EgressOctetsPerSecond = (1000 * (s.EgressOctets - o.EgressOctets)) / diff
-			s.PacketsPerSecond = (1000 * (s.Packets - o.Packets)) / diff
-			s.OctetsPerSecond = (1000 * (s.Octets - o.Octets)) / diff
+			s.IngressPacketsPerSecond = (1000 * (s.IngressPackets - o.IngressPackets)) / diff
+			s.IngressOctetsPerSecond = (1000 * (s.IngressOctets - o.IngressOctets)) / diff
 			s.FlowsPerSecond = (1000 * (s.Flows - o.Flows)) / diff
 		}
 	}
