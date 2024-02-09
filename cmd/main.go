@@ -214,7 +214,7 @@ func main() {
 		w.Write([]byte("\n"))
 	})
 
-	// Remove this if migrating to a different load balancing engine
+	// Remove/update this if migrating to a different load balancing engine
 	http.HandleFunc("/lb.json", func(w http.ResponseWriter, r *http.Request) {
 		var ret []interface{}
 		type status struct {

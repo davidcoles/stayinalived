@@ -108,7 +108,7 @@ function updateStatus(url) {
             console.log('Something went wrong: ' + err)
         } else {
 
-	    var summary = summary_t(data.summary)
+	    var summary = summary_t(data.summary, data.bgp)
 
 	    var services = document.createElement("div");
 	    
@@ -177,7 +177,7 @@ function vips_t(vips, dsr) {
     return t
 }
 
-function summary_t(s) {
+function summary_t(s, bgp) {
     var div = document.createElement("div");
     var t = append(div, "table")
     var hd = append(t, "tr", null, "hd")
@@ -216,7 +216,15 @@ function summary_t(s) {
 
     append(hd, "th", "Active connections")
     append(tr, "td", spc(s.current), "ar")
-    
+
+    var peers = Object.keys(bgp).sort()
+
+    for(var peer of peers) {
+	var conn = bgp[peer];
+	append(hd, "th", peer)
+	append(tr, "td", conn.State, conn.State == "ESTABLISHED" ? "up" : "dn")
+    }
+			
     return div
 }
 
@@ -334,15 +342,18 @@ function updateLogs(url) {
         if (err !== null) {
             //alert('Something went wrong: ' + err);
         } else {
-            data.forEach(function(item, index) {
-                //console.log(index);
-                //if(item.Level < 7) {
-                    lastlog = item.indx;
-                    var date = new Date(item.time*1000);
-                    var time = date.toLocaleString();
+	    if(data !== null ) {
+               data.forEach(function(item, index) {
+                   //console.log(index);
+                   //if(item.Level < 7) {
+                   lastlog = item.indx;
+                   var date = new Date(item.time*1000);
+                   var time = date.toLocaleString();
                     addMessage(time + ": " + item.text);
-                //}
-            })
+                   //}
+	       })
+	    }
+		
         }
     })
 }
