@@ -99,7 +99,7 @@ func main() {
 		if err != nil {
 			log.Fatal("Couldn't listen on BGP port", err)
 		}
-		go bgpListener(l, logs)
+		go bgpListener(l, logs.sub("bgp"))
 	}
 
 	client, err := NewClient()
@@ -465,21 +465,4 @@ func (s *Stats) update(u lb.Stats) Stats {
 	}
 
 	return *s
-}
-
-func bgpListener(l net.Listener, logs *logger) {
-
-	for {
-		conn, err := l.Accept()
-
-		if err != nil {
-			logs.ERR("listner", "Failed to accept connection", err)
-		} else {
-			go func(c net.Conn) {
-				logs.DEBUG("listner", "Accepted connection")
-				defer c.Close()
-				time.Sleep(time.Minute)
-			}(conn)
-		}
-	}
 }
