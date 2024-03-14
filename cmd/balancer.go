@@ -22,11 +22,15 @@ import (
 	"encoding/json"
 	//"errors"
 	"fmt"
+	"net"
 	"net/netip"
+
+	"github.com/davidcoles/cue"
 
 	"github.com/cloudflare/ipvs"
 	"github.com/cloudflare/ipvs/netmask"
-	"github.com/davidcoles/cue"
+	"github.com/lrh3321/ipset-go"
+	"github.com/vishvananda/netlink"
 )
 
 type tuple struct {
@@ -38,6 +42,10 @@ type tuple struct {
 type Balancer struct {
 	Client ipvs.Client
 	Logger Logger
+	Link   *netlink.Link
+	IPSet  string
+
+	vip map[netip.Addr]bool
 }
 
 type Client = ipvs.Client
@@ -46,10 +54,53 @@ func NewClient() (ipvs.Client, error) {
 	return ipvs.New()
 }
 
+// FIXME add background function to maintain IP address and ipset group
+
+// FIXME add logging
+func netlinkAddr(a netip.Addr) *netlink.Addr {
+
+	if p, err := a.Prefix(a.BitLen()); err == nil {
+		if i, err := netlink.ParseAddr(p.String()); err == nil {
+			return i
+		}
+	}
+
+	return nil
+}
+
+func ipsetEntry(s ipvs.Service) *ipset.Entry {
+
+	var ip net.IP
+
+	if s.Address.Is4() {
+		ip4 := s.Address.As4()
+		ip = ip4[:]
+	} else if s.Address.Is6() {
+		ip6 := s.Address.As16()
+		ip = ip6[:]
+	} else {
+		return nil
+	}
+
+	p := uint8(s.Protocol)
+
+	return &ipset.Entry{IP: ip, Port: &(s.Port), Protocol: &p, Replace: true}
+}
+
 func (b *Balancer) INFO(s string, a ...any) { b.Logger.INFO(s, a...) }
 func (b *Balancer) ERR(s string, a ...any)  { b.Logger.ERR(s, a...) }
 
 func (b *Balancer) Configure(services []cue.Service) error {
+
+	if len(b.vip) < 1 && b.IPSet != "" {
+
+		ipset.Create(b.IPSet, "hash:ip,port", ipset.CreateOptions{Timeout: 300, Replace: true})
+		//ipset.Create(b.IPSet, "hash:ip,port", ipset.CreateOptions{Replace: true})
+
+		ipset.Flush(b.IPSet)
+	}
+
+	vip := map[netip.Addr]bool{}
 
 	target := map[tuple]cue.Service{}
 
@@ -60,6 +111,8 @@ func (b *Balancer) Configure(services []cue.Service) error {
 	svcs, _ := b.Client.Services()
 	for _, s := range svcs {
 
+		vip[s.Service.Address] = true
+
 		key := tuple{addr: s.Service.Address, port: s.Service.Port, prot: uint8(s.Service.Protocol)}
 
 		if t, wanted := target[key]; !wanted {
@@ -68,6 +121,10 @@ func (b *Balancer) Configure(services []cue.Service) error {
 				b.ERR(logServRemove(s.Service).err(err))
 			} else {
 				b.INFO(logServRemove(s.Service).log())
+			}
+
+			if e := ipsetEntry(s.Service); e != nil && b.IPSet != "" {
+				ipset.Del(b.IPSet, e)
 			}
 
 		} else {
@@ -81,6 +138,10 @@ func (b *Balancer) Configure(services []cue.Service) error {
 				} else {
 					b.INFO(logServUpdate(service, s.Service).log())
 				}
+			}
+
+			if e := ipsetEntry(service); e != nil && b.IPSet != "" {
+				ipset.Add(b.IPSet, e)
 			}
 
 			b.destinations(s.Service, t.Destinations)
@@ -100,8 +161,32 @@ func (b *Balancer) Configure(services []cue.Service) error {
 			b.INFO(logServCreate(service).log())
 		}
 
+		if e := ipsetEntry(service); e != nil && b.IPSet != "" {
+			ipset.Add(b.IPSet, e)
+		}
+
 		b.destinations(service, t.Destinations)
 	}
+
+	// add service IP addresses to interface
+	for v, _ := range vip {
+		addr := netlinkAddr(v)
+		if b.Link != nil && addr != nil {
+			netlink.AddrAdd(*b.Link, netlinkAddr(v))
+		}
+
+		delete(b.vip, v) // ensure address doesn't get removed in next step
+	}
+
+	// remove any addresses which are no longer active
+	for v, _ := range b.vip {
+		addr := netlinkAddr(v)
+		if b.Link != nil && addr != nil {
+			netlink.AddrDel(*b.Link, netlinkAddr(v))
+		}
+	}
+
+	b.vip = vip
 
 	return nil
 }
@@ -209,7 +294,8 @@ type serv = ipvs.Service
 func logServEvent(e string, s serv, p ...ipvs.Service) *LE {
 	kv := KV{"service": svc(s)}
 	if len(p) > 0 {
-		kv.add("previous", svc(p[0]))
+		//kv.add("previous", svc(p[0]))
+		kv["previous"] = svc(p[0])
 	}
 	return &LE{f: "service." + e, k: kv}
 }
@@ -222,7 +308,8 @@ func logServUpdate(s, p serv) *LE { return logServEvent("update", s, p) }
 func logDestEvent(e string, s ipvs.Service, d ipvs.Destination, p ...ipvs.Destination) *LE {
 	kv := KV{"service": svc(s), "destination": dst(d)}
 	if len(p) > 1 {
-		kv.add("previous", dst(p[0]))
+		//kv.add("previous", dst(p[0]))
+		kv["previous"] = dst(p[0])
 	}
 	return &LE{f: "destination." + e, k: kv}
 }
@@ -249,5 +336,5 @@ type LE struct {
 }
 
 func (l *LE) log() (string, KV)        { return l.f, l.k }
-func (l *LE) err(e error) (string, KV) { l.k.add("error", e.Error()); return l.log() }
+func (l *LE) err(e error) (string, KV) { l.k["error"] = e.Error(); return l.log() }
 func (l *LE) add(k string, e any) *LE  { l.k[k] = e; return l }

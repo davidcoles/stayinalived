@@ -37,10 +37,10 @@ import (
 	"syscall"
 	"time"
 
+	lb "github.com/cloudflare/ipvs"
 	"github.com/davidcoles/cue"
 	"github.com/davidcoles/cue/bgp"
-
-	lb "github.com/cloudflare/ipvs"
+	"github.com/vishvananda/netlink"
 )
 
 // TODO:
@@ -57,6 +57,8 @@ func main() {
 
 	start := time.Now()
 	root := flag.String("r", "", "webserver root directory")
+	iface := flag.String("i", "", "interface to add VIPs to")
+	ipset := flag.String("s", "", "ipset")
 	webserver := flag.String("w", ":80", "webserver listen address")
 	elasticsearch := flag.Bool("e", false, "Elasticsearch logging")
 
@@ -79,6 +81,15 @@ func main() {
 	if err != nil {
 		logs.EMERG(F, "Couldn't load config file:", config, err)
 		log.Fatal("Couldn't load config file:", config, err)
+	}
+
+	var link *netlink.Link
+	if *iface != "" {
+		l, err := netlink.LinkByName(*iface)
+		if err != nil {
+			log.Fatal(err)
+		}
+		link = &l
 	}
 
 	if config.Webserver != "" {
@@ -120,6 +131,8 @@ func main() {
 		Balancer: &Balancer{
 			Client: client,
 			Logger: logs.sub("ipvs"),
+			Link:   link,
+			IPSet:  *ipset,
 		},
 	}
 
@@ -160,6 +173,8 @@ func main() {
 		ticker := time.NewTicker(5 * time.Second)
 		services := director.Status()
 
+		test := time.NewTicker(60 * time.Second)
+
 		defer func() {
 			ticker.Stop()
 			timer.Stop()
@@ -171,6 +186,8 @@ func main() {
 		var initialised bool
 		for {
 			select {
+			case <-test.C:
+				director.Trigger()
 			case <-ticker.C: // check for matured VIPs
 			case <-director.C: // a backend has changed state
 				services = director.Status()
