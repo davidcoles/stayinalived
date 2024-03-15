@@ -4,7 +4,7 @@ go 1.20
 
 require (
 	github.com/cloudflare/ipvs v0.10.1
-	github.com/davidcoles/cue v0.0.2
+	github.com/davidcoles/cue v0.0.4
 	github.com/elastic/go-elasticsearch/v7 v7.17.10
 	github.com/lrh3321/ipset-go v0.0.0-20230425010353-0d9880b1ecac
 	github.com/vishvananda/netlink v1.2.1-beta.2
@@ -33,5 +33,3 @@ require (
 	modernc.org/strutil v1.1.3 // indirect
 	modernc.org/token v1.0.1 // indirect
 )
-
-replace github.com/davidcoles/cue => ../../cue

@@ -35,15 +35,31 @@ my %defaults;
 my $scheduler = $conf->{'scheduler'} if exists $conf->{'scheduler'};
 
 $json->{'services'} = services($scheduler, $services, \%defaults, $servers, $policy);
-$json->{'bgp'} = new_rhi($conf->{'rhi'}, $conf->{'prefixes'});
+$json->{'bgp'} = new_rhi($conf->{'bgp'}, $conf->{'prefixes'});
 $conf->{'learn'}+=0 if defined $conf->{'learn'};
 
-foreach(qw(vlans learn multicast webserver defcon)) {
+foreach(qw(vlans multicast webserver webroot defcon logging address interfaces native untagged)) {
     $json->{$_} = $conf->{$_} if exists $conf->{$_};
 }
 
-if(defined $conf->{'rhi'} && jsonbool($conf->{'rhi'}->{'listen'})) {
+if(defined $conf->{'native'}) {
+    $json->{'native'} = jsonbool($conf->{'native'});
+}
+
+if(defined $conf->{'untagged'}) {
+    $json->{'untagged'} = jsonbool($conf->{'untagged'});
+}
+
+if(defined $conf->{'bgp'} && jsonbool($conf->{'bgp'}->{'listen'})) {
     $json->{'listen'} = $TRUE;
+}
+
+if(defined $conf->{'bgp'} && $conf->{'bgp'}->{'learn'} > 0) {
+    $json->{'learn'} = $conf->{'bgp'}->{'learn'} + 0;
+}
+
+if(defined $json->{'logging'}) {
+    $json->{'logging'}->{'alert'}+=0;
 }
 
 if(defined $json->{'defcon'}) {
@@ -485,14 +501,41 @@ sub params {
 __END__;
 ---
 
-rhi:
+#webserver: :80
+#webroot: /var/local/vc5
+#multicast: 224.0.0.1:12345
+
+#native: false
+#untagged: false
+#address: 10.1.10.100 # load balancer server's primary ip
+#interfaces:
+#  - ens192
+#  - ens224
+    
+bgp:
   as_number: 65000
   peers:
-    - 10.1.2.200
+    - 10.1.10.200
 
-vlans:
-  10: 10.1.10.0/24
-  20: 10.1.20.0/24
+# If Teams or Slack webhook URLs are set then messages of level <alert> (default 0) or lower wil be sent to the channel.
+# If elasticsearch/index is set then all logs will be written to elasticsearch
+# Other setting are optional, and the usual Elasticsearch environment variables will be consulted by the library
+    
+#logging:
+#  #alert: 4 # 0:EMERG, 1:ALERT, 2:CRIT, 3:ERR, 4:WARNING, 5:NOTICE, 6:INFO, 7:DEBUG
+#  #teams: https://myorganisation.webhook.office.com/webhookb2/....
+#  #slack: https://hooks.slack.com/services/....
+#  elasticsearch:
+#    index: vc5
+#    #addresses:
+#    #  - http://10.1.2.31/    
+#    #  - http://10.1.2.32/    
+#    #username: elastic
+#    #password: Xg5nRkc9RA3hALMiBw8X
+    
+#vlans:
+#  10: 10.1.10.0/24
+#  20: 10.1.20.0/24
 
 services:
   
@@ -508,12 +551,13 @@ services:
     policy:
       http:
         
-  - name: bind
-    virtual:
-      - 192.168.101.2
-    servers:
-      - 10.1.20.1
-      - 10.1.20.2
-      - 10.1.20.3
-    policy:
-      domain:
+#  - name: bind
+#    description: DNS server on a different VLAN
+#    virtual:
+#      - 192.168.101.2
+#    servers:
+#      - 10.1.20.1
+#      - 10.1.20.2
+#      - 10.1.20.3
+#    policy:
+#      domain:

@@ -29,7 +29,7 @@ import (
 	"net/netip"
 	"os"
 	"os/signal"
-	//"runtime/debug"
+	"runtime/debug"
 	"sort"
 	"strconv"
 	"strings"
@@ -37,9 +37,10 @@ import (
 	"syscall"
 	"time"
 
-	lb "github.com/cloudflare/ipvs"
 	"github.com/davidcoles/cue"
 	"github.com/davidcoles/cue/bgp"
+
+	lb "github.com/cloudflare/ipvs"
 	"github.com/vishvananda/netlink"
 )
 
@@ -49,51 +50,59 @@ import (
 var STATIC embed.FS
 
 func main() {
-	F := "vc5"
 
-	//fmt.Println(debug.ReadBuildInfo())
+	F := "vc5"
 
 	var mutex sync.Mutex
 
 	start := time.Now()
-	root := flag.String("r", "", "webserver root directory")
-	iface := flag.String("i", "", "interface to add VIPs to")
-	ipset := flag.String("s", "", "ipset")
+	webroot := flag.String("r", "", "webserver root directory")
 	webserver := flag.String("w", ":80", "webserver listen address")
-	elasticsearch := flag.Bool("e", false, "Elasticsearch logging")
+	addr := flag.String("a", "", "address")
+	ipset := flag.String("s", "", "ipset")
+	iface := flag.String("i", "", "interface to add VIPs to")
 
 	flag.Parse()
 
 	args := flag.Args()
 
-	logs := &logger{elastic: *elasticsearch}
-
 	file := args[0]
-	addr := netip.MustParseAddr(args[1])
-
-	if !addr.Is4() {
-		logs.EMERG(F, "Address is not IPv4:", addr)
-		log.Fatal("Address is not IPv4: ", addr)
-	}
 
 	config, err := Load(file)
 
 	if err != nil {
-		logs.EMERG(F, "Couldn't load config file:", config, err)
 		log.Fatal("Couldn't load config file:", config, err)
 	}
+
+	logs := &(config.Logging)
 
 	var link *netlink.Link
 	if *iface != "" {
 		l, err := netlink.LinkByName(*iface)
 		if err != nil {
+			logs.EMERG(F, "Couldn't open netlink:", err)
 			log.Fatal(err)
 		}
 		link = &l
 	}
 
+	if config.Address != "" {
+		*addr = config.Address
+	}
+
 	if config.Webserver != "" {
 		*webserver = config.Webserver
+	}
+
+	if config.Webroot != "" {
+		*webroot = config.Webroot
+	}
+
+	address := netip.MustParseAddr(*addr)
+
+	if !address.Is4() {
+		logs.EMERG(F, "Address is not IPv4:", address)
+		log.Fatal("Address is not IPv4: ", address)
 	}
 
 	var listener net.Listener
@@ -120,7 +129,7 @@ func main() {
 		log.Fatal(err)
 	}
 
-	pool := bgp.NewPool(addr.As4(), config.BGP, nil, logs.sub("bgp"))
+	pool := bgp.NewPool(address.As4(), config.BGP, nil, logs.sub("bgp"))
 
 	if pool == nil {
 		log.Fatal("BGP pool fail")
@@ -173,8 +182,6 @@ func main() {
 		ticker := time.NewTicker(5 * time.Second)
 		services := director.Status()
 
-		test := time.NewTicker(60 * time.Second)
-
 		defer func() {
 			ticker.Stop()
 			timer.Stop()
@@ -186,8 +193,6 @@ func main() {
 		var initialised bool
 		for {
 			select {
-			case <-test.C:
-				director.Trigger()
 			case <-ticker.C: // check for matured VIPs
 			case <-director.C: // a backend has changed state
 				services = director.Status()
@@ -207,13 +212,13 @@ func main() {
 		}
 	}()
 
-	fmt.Println("******************** RUNNING ********************")
+	log.Println("Initialised")
 
 	static := http.FS(STATIC)
 	var fs http.FileSystem
 
-	if *root != "" {
-		fs = http.FileSystem(http.Dir(*root))
+	if *webroot != "" {
+		fs = http.FileSystem(http.Dir(*webroot))
 	}
 
 	http.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
@@ -249,7 +254,24 @@ func main() {
 		w.Write([]byte("\n"))
 	})
 
-	// Remove/update this if migrating to a different load balancing engine
+	http.HandleFunc("/build.json", func(w http.ResponseWriter, r *http.Request) {
+		info, ok := debug.ReadBuildInfo()
+		if !ok {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+
+		js, err := json.MarshalIndent(info, " ", " ")
+		if err != nil {
+			w.WriteHeader(http.StatusInternalServerError)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.Write(js)
+		w.Write([]byte("\n"))
+	})
+
+	// // Remove this if migrating to a different load balancing engine
 	http.HandleFunc("/lb.json", func(w http.ResponseWriter, r *http.Request) {
 		var ret []interface{}
 		type status struct {
@@ -272,6 +294,11 @@ func main() {
 	})
 
 	http.HandleFunc("/config.json", func(w http.ResponseWriter, r *http.Request) {
+
+		config.Address = *addr
+		config.Webserver = *webserver
+		config.Webroot = *webroot
+
 		js, err := json.MarshalIndent(config, " ", " ")
 		if err != nil {
 			w.WriteHeader(http.StatusInternalServerError)
@@ -301,12 +328,14 @@ func main() {
 			BGP      map[string]bgp.Status `json:"bgp"`
 			VIP      []VIPStats            `json:"vip"`
 			RIB      []netip.Addr          `json:"rib"`
+			Logging  LogStats              `json:"logging"`
 		}{
 			Summary:  summary,
 			Services: services,
 			BGP:      pool.Status(),
 			VIP:      vipStatus(services, rib),
 			RIB:      rib,
+			Logging:  logs.Stats(),
 		}, " ", " ")
 		mutex.Unlock()
 
@@ -334,19 +363,14 @@ func main() {
 		log.Fatal(server.Serve(listener))
 	}()
 
-	sig := make(chan os.Signal)
-	signal.Notify(sig, syscall.SIGINT, syscall.SIGQUIT)
+	sig := make(chan os.Signal, 10)
+	signal.Notify(sig, syscall.SIGUSR2, syscall.SIGINT, syscall.SIGTERM, syscall.SIGQUIT)
 
 	for {
 		switch <-sig {
-		case syscall.SIGQUIT:
-			logs.ALERT(F, "SIGQUIT received - shutting down")
-			fmt.Println("CLOSING")
-			close(done) // shut down BGP, etc
-			time.Sleep(4 * time.Second)
-			fmt.Println("DONE")
-			return
 		case syscall.SIGINT:
+			fallthrough
+		case syscall.SIGUSR2:
 			logs.NOTICE(F, "Reload signal received")
 			conf, err := Load(file)
 			if err == nil {
@@ -358,6 +382,16 @@ func main() {
 			} else {
 				logs.ALERT(F, "Couldn't load config file:", file, err)
 			}
+
+		case syscall.SIGTERM:
+			fallthrough
+		case syscall.SIGQUIT:
+			logs.ALERT(F, "Shutting down")
+			fmt.Println("CLOSING")
+			close(done) // shut down BGP, etc
+			time.Sleep(4 * time.Second)
+			fmt.Println("DONE")
+			return
 		}
 	}
 }
@@ -371,12 +405,8 @@ func serviceStatus(config *Config, client Client, director *cue.Director, old ma
 
 	for _, svc := range director.Status() {
 
-		xs := ipvsService(svc)
-		xse, err := client.Service(xs)
-
-		if err != nil {
-			fmt.Println(err)
-		}
+		xs := lb.Service{Address: svc.Address, Port: svc.Port, Protocol: lb.Protocol(svc.Protocol), Family: lb.INET}
+		xse, _ := client.Service(xs)
 
 		t := Tuple{Addr: svc.Address, Port: svc.Port, Protocol: svc.Protocol}
 		cnf, _ := config.Services[t]
