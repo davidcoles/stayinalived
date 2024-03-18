@@ -278,12 +278,20 @@ func main() {
 			Service      lb.ServiceExtended
 			Destinations []lb.DestinationExtended
 		}
+		info, _ := client.Info()
 		svcs, _ := client.Services()
 		for _, se := range svcs {
 			dsts, _ := client.Destinations(se.Service)
 			ret = append(ret, status{Service: se, Destinations: dsts})
 		}
-		js, err := json.MarshalIndent(&ret, " ", " ")
+		//js, err := json.MarshalIndent(&ret, " ", " ")
+		js, err := json.MarshalIndent(struct {
+			Info     any
+			Services []any
+		}{
+			Info:     info,
+			Services: ret,
+		}, "", " ")
 		if err != nil {
 			w.WriteHeader(http.StatusInternalServerError)
 			return
@@ -351,7 +359,7 @@ func main() {
 	http.HandleFunc("/metrics", func(w http.ResponseWriter, r *http.Request) {
 
 		mutex.Lock()
-		metrics := prometheus(services, summary, vip)
+		metrics := prometheus("stayinalived", services, summary, vip)
 		mutex.Unlock()
 
 		w.Header().Set("Content-Type", "text/plain")
