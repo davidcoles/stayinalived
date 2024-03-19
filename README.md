@@ -2,8 +2,6 @@
 
 IPVS based loadbalancer: `make stayinalived`
 
-See https://github.com/davidcoles/vc5 for list of dependencies that need to be installed.
-
 Very early work, not really for public consumption.
 
 ## NOTES

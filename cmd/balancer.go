@@ -24,6 +24,7 @@ import (
 	"fmt"
 	"net"
 	"net/netip"
+	"sync"
 
 	"github.com/davidcoles/cue"
 
@@ -45,7 +46,8 @@ type Balancer struct {
 	Link   *netlink.Link
 	IPSet  string
 
-	vip map[netip.Addr]bool
+	mutex sync.Mutex
+	state map[tuple]cue.Service
 }
 
 type Client = ipvs.Client
@@ -54,9 +56,6 @@ func NewClient() (ipvs.Client, error) {
 	return ipvs.New()
 }
 
-// FIXME add background function to maintain IP address and ipset group
-
-// FIXME add logging
 func netlinkAddr(a netip.Addr) *netlink.Addr {
 
 	if p, err := a.Prefix(a.BitLen()); err == nil {
@@ -68,54 +67,89 @@ func netlinkAddr(a netip.Addr) *netlink.Addr {
 	return nil
 }
 
-func ipsetEntry(s ipvs.Service) *ipset.Entry {
+func (b *Balancer) INFO(s string, a ...any) { b.Logger.INFO(s, a...) }
+func (b *Balancer) ERR(s string, a ...any)  { b.Logger.ERR(s, a...) }
+
+// arrange to call every 60 seconds to maintain ipset & vips
+func (b *Balancer) Maintain() {
+	b.mutex.Lock()
+	defer b.mutex.Unlock()
+	b._maintain()
+}
+
+// must be called under lock
+func (b *Balancer) _vips() map[netip.Addr]bool {
+	vips := map[netip.Addr]bool{}
+
+	for t, _ := range b.state {
+		vips[t.addr] = true
+	}
+
+	return vips
+}
+
+// must be called under lock
+func (b *Balancer) _maintain() {
+
+	ipset.Create(b.IPSet, "hash:ip,port", ipset.CreateOptions{Timeout: 90, Replace: true})
+
+	for t, _ := range b.state {
+		if e := ipsetEntry(t); e != nil && b.IPSet != "" {
+			ipset.Add(b.IPSet, e)
+		}
+	}
+
+	for v, _ := range b._vips() {
+		if addr := netlinkAddr(v); b.Link != nil && addr != nil {
+			netlink.AddrAdd(*b.Link, netlinkAddr(v))
+		}
+	}
+}
+
+func ipsetEntry(t tuple) *ipset.Entry {
 
 	var ip net.IP
 
-	if s.Address.Is4() {
-		ip4 := s.Address.As4()
+	if t.addr.Is4() {
+		ip4 := t.addr.As4()
 		ip = ip4[:]
-	} else if s.Address.Is6() {
-		ip6 := s.Address.As16()
+	} else if t.addr.Is6() {
+		ip6 := t.addr.As16()
 		ip = ip6[:]
 	} else {
 		return nil
 	}
 
-	p := uint8(s.Protocol)
-
-	return &ipset.Entry{IP: ip, Port: &(s.Port), Protocol: &p, Replace: true}
+	return &ipset.Entry{IP: ip, Port: &(t.port), Protocol: &(t.prot), Replace: true}
 }
 
-func (b *Balancer) INFO(s string, a ...any) { b.Logger.INFO(s, a...) }
-func (b *Balancer) ERR(s string, a ...any)  { b.Logger.ERR(s, a...) }
-
-func (b *Balancer) Configure(services []cue.Service) error {
-
-	if len(b.vip) < 1 && b.IPSet != "" {
-
-		ipset.Create(b.IPSet, "hash:ip,port", ipset.CreateOptions{Timeout: 300, Replace: true})
-		//ipset.Create(b.IPSet, "hash:ip,port", ipset.CreateOptions{Replace: true})
-
-		ipset.Flush(b.IPSet)
-	}
-
-	vip := map[netip.Addr]bool{}
-
+func mapServices(services []cue.Service) map[tuple]cue.Service {
 	target := map[tuple]cue.Service{}
-
 	for _, s := range services {
 		target[tuple{addr: s.Address, port: s.Port, prot: s.Protocol}] = s
+	}
+	return target
+}
+
+func (b *Balancer) Configure(services []cue.Service) error {
+	b.mutex.Lock()
+	defer b.mutex.Unlock()
+
+	vipsToDelete := b._vips() // delete old vips if not still required
+
+	todo := mapServices(services)
+	b.state = mapServices(services) // update record for later
+
+	for t, _ := range todo {
+		delete(vipsToDelete, t.addr) // retain this vip
 	}
 
 	svcs, _ := b.Client.Services()
 	for _, s := range svcs {
 
-		vip[s.Service.Address] = true
-
 		key := tuple{addr: s.Service.Address, port: s.Service.Port, prot: uint8(s.Service.Protocol)}
 
-		if t, wanted := target[key]; !wanted {
+		if t, wanted := todo[key]; !wanted {
 
 			if err := b.Client.RemoveService(s.Service); err != nil {
 				b.ERR(logServRemove(s.Service).err(err))
@@ -123,7 +157,7 @@ func (b *Balancer) Configure(services []cue.Service) error {
 				b.INFO(logServRemove(s.Service).log())
 			}
 
-			if e := ipsetEntry(s.Service); e != nil && b.IPSet != "" {
+			if e := ipsetEntry(key); e != nil && b.IPSet != "" {
 				ipset.Del(b.IPSet, e)
 			}
 
@@ -132,7 +166,6 @@ func (b *Balancer) Configure(services []cue.Service) error {
 			service := ipvsService(t)
 
 			if service != s.Service {
-
 				if err := b.Client.UpdateService(service); err != nil {
 					b.ERR(logServUpdate(service, s.Service).err(err))
 				} else {
@@ -140,19 +173,15 @@ func (b *Balancer) Configure(services []cue.Service) error {
 				}
 			}
 
-			if e := ipsetEntry(service); e != nil && b.IPSet != "" {
-				ipset.Add(b.IPSet, e)
-			}
-
 			b.destinations(s.Service, t.Destinations)
 
-			delete(target, key)
+			delete(todo, key) // no need to create as it exists - take off the todo list
 		}
 	}
 
-	for _, t := range target {
-
-		service := ipvsService(t)
+	// create any non-existing services
+	for _, s := range todo {
+		service := ipvsService(s)
 
 		if err := b.Client.CreateService(service); err != nil {
 			b.ERR(logServCreate(service).err(err))
@@ -161,32 +190,17 @@ func (b *Balancer) Configure(services []cue.Service) error {
 			b.INFO(logServCreate(service).log())
 		}
 
-		if e := ipsetEntry(service); e != nil && b.IPSet != "" {
-			ipset.Add(b.IPSet, e)
-		}
-
-		b.destinations(service, t.Destinations)
-	}
-
-	// add service IP addresses to interface
-	for v, _ := range vip {
-		addr := netlinkAddr(v)
-		if b.Link != nil && addr != nil {
-			netlink.AddrAdd(*b.Link, netlinkAddr(v))
-		}
-
-		delete(b.vip, v) // ensure address doesn't get removed in next step
+		b.destinations(service, s.Destinations)
 	}
 
 	// remove any addresses which are no longer active
-	for v, _ := range b.vip {
-		addr := netlinkAddr(v)
-		if b.Link != nil && addr != nil {
+	for v, _ := range vipsToDelete {
+		if addr := netlinkAddr(v); b.Link != nil && addr != nil {
 			netlink.AddrDel(*b.Link, netlinkAddr(v))
 		}
 	}
 
-	b.vip = vip
+	b._maintain() // make sure IP is on link device and ipset is populated
 
 	return nil
 }

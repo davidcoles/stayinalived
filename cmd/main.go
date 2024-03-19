@@ -135,14 +135,22 @@ func main() {
 		log.Fatal("BGP pool fail")
 	}
 
+	balancer := &Balancer{
+		Client: client,
+		Logger: logs.sub("ipvs"),
+		Link:   link,
+		IPSet:  *ipset,
+	}
+
 	director := &cue.Director{
-		Logger: logs.sub("director"),
-		Balancer: &Balancer{
-			Client: client,
-			Logger: logs.sub("ipvs"),
-			Link:   link,
-			IPSet:  *ipset,
-		},
+		Logger:   logs.sub("director"),
+		Balancer: balancer,
+		//Balancer: &Balancer{
+		//	Client: client,
+		//	Logger: logs.sub("ipvs"),
+		//	Link:   link,
+		//	IPSet:  *ipset,
+		//},
 	}
 
 	err = director.Start(config.parse())
@@ -160,6 +168,19 @@ func main() {
 	var summary Summary
 
 	services, old, _ := serviceStatus(config, client, director, nil)
+
+	go func() {
+		ticker := time.NewTicker(time.Minute)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ticker.C:
+			case <-done:
+				return
+			}
+			balancer.Maintain()
+		}
+	}()
 
 	go func() {
 		ticker := time.NewTicker(10 * time.Second)
