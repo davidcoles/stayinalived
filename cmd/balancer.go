@@ -135,13 +135,12 @@ func (b *Balancer) Configure(services []cue.Service) error {
 	b.mutex.Lock()
 	defer b.mutex.Unlock()
 
-	vipsToDelete := b._vips() // delete old vips if not still required
-
-	todo := mapServices(services)
-	b.state = mapServices(services) // update record for later
+	vipsToRemove := b._vips()       // delete old vips if not still required
+	todo := mapServices(services)   // services which will need to be configured
+	b.state = mapServices(services) // update state for next time
 
 	for t, _ := range todo {
-		delete(vipsToDelete, t.addr) // retain this vip
+		delete(vipsToRemove, t.addr) // don't remove required vips
 	}
 
 	svcs, _ := b.Client.Services()
@@ -194,7 +193,7 @@ func (b *Balancer) Configure(services []cue.Service) error {
 	}
 
 	// remove any addresses which are no longer active
-	for v, _ := range vipsToDelete {
+	for v, _ := range vipsToRemove {
 		if addr := netlinkAddr(v); b.Link != nil && addr != nil {
 			netlink.AddrDel(*b.Link, netlinkAddr(v))
 		}
