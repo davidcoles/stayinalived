@@ -146,6 +146,10 @@ func (b *Balancer) Configure(services []cue.Service) error {
 	svcs, _ := b.Client.Services()
 	for _, s := range svcs {
 
+		if !s.Service.Address.Is4() && !s.Service.Address.Is6() {
+			continue
+		}
+
 		key := tuple{addr: s.Service.Address, port: s.Service.Port, prot: uint8(s.Service.Protocol)}
 
 		if t, wanted := todo[key]; !wanted {
