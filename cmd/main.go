@@ -143,7 +143,7 @@ func main() {
 	}
 
 	director := &cue.Director{
-		Logger:   logs.sub("director"),
+		//Logger:   logs.sub("director"),
 		Balancer: balancer,
 		//Balancer: &Balancer{
 		//	Client: client,

@@ -1,8 +1,8 @@
 github.com/cloudflare/ipvs v0.10.1 h1:rRP+HtkATKJd62iGulRq3hg+oh/kJyttFLizGO4aB3I=
 github.com/cloudflare/ipvs v0.10.1/go.mod h1:HBnpmdbOqfYEz7Qkix+IdMfu+7lnPL/5o8iWTXrc5ZQ=
 github.com/davecgh/go-spew v1.1.0 h1:ZDRjVQ15GmhC3fiQ8ni8+OwkZQO4DARzQgrnXU1Liz8=
-github.com/davidcoles/cue v0.0.4 h1:DnDmr5PuKCypMk7e7pY+Nd0upxCz/Jjixp07/g7ulpg=
-github.com/davidcoles/cue v0.0.4/go.mod h1:uUTkCvlkD+nqbmP9XyA63BGMW3g3JJRYC0q8vJKSXMc=
+github.com/davidcoles/cue v0.0.5 h1:qD2XHJWuAh8sOdhLxmEuOOVYT7JLeGJKcJquWsESpl8=
+github.com/davidcoles/cue v0.0.5/go.mod h1:uUTkCvlkD+nqbmP9XyA63BGMW3g3JJRYC0q8vJKSXMc=
 github.com/dustin/go-humanize v1.0.0 h1:VSnTsYCnlFHaM2/igO1h6X3HA71jcobQuxemgkq4zYo=
 github.com/elastic/go-elasticsearch/v7 v7.17.10 h1:TCQ8i4PmIJuBunvBS6bwT2ybzVFxxUhhltAs3Gyu1yo=
 github.com/elastic/go-elasticsearch/v7 v7.17.10/go.mod h1:OJ4wdbtDNk5g503kvlHLyErCgQwwzmDtaFC4XyOxXA4=
