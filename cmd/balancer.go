@@ -374,12 +374,58 @@ func (l *LE) log() (string, KV)        { return l.f, l.k }
 func (l *LE) err(e error) (string, KV) { l.k["error"] = e.Error(); return l.log() }
 func (l *LE) add(k string, e any) *LE  { l.k[k] = e; return l }
 
+func probeLog(instance mon.Instance, check mon.Check, status bool, reason string) map[string]any {
+
+	kv := map[string]any{
+		"reason": reason,
+		"status": updown(status),
+		"proto":  proto(instance.Service.Protocol),
+		"saddr":  instance.Service.Address.String(),
+		"sport":  instance.Service.Port,
+		"daddr":  instance.Destination.Address.String(),
+		"dport":  instance.Destination.Port,
+		"probe":  check.Type,
+		"pport":  check.Port,
+	}
+
+	switch check.Type {
+	case "dns":
+		if check.Method {
+			kv["method"] = "tcp"
+		} else {
+			kv["method"] = "udp"
+		}
+	case "http":
+		fallthrough
+	case "https":
+		if check.Method {
+			kv["method"] = "HEAD"
+		} else {
+			kv["method"] = "GET"
+		}
+
+		if check.Host != "" {
+			kv["host"] = check.Host
+		}
+
+		if check.Path != "" {
+			kv["path"] = check.Path
+		}
+
+		if len(check.Expect) > 0 {
+			kv["expect"] = fmt.Sprintf("%v", check.Expect)
+		}
+	}
+
+	return kv
+}
+
 func notifyLog(instance mon.Instance, status bool) map[string]any {
 	return map[string]any{
 		"status": updown(status),
+		"proto":  proto(instance.Service.Protocol),
 		"saddr":  instance.Service.Address.String(),
 		"sport":  instance.Service.Port,
-		"proto":  proto(instance.Service.Protocol),
 		"daddr":  instance.Destination.Address.String(),
 		"dport":  instance.Destination.Port,
 	}
@@ -393,50 +439,4 @@ func proto(p uint8) string {
 		return "udp"
 	}
 	return fmt.Sprintf("%d", p)
-}
-
-func probeLog(instance mon.Instance, c mon.Check, ok bool, s string) map[string]any {
-
-	kv := map[string]any{
-		"saddr": instance.Service.Address.String(),
-		"sport": instance.Service.Port,
-		"proto": proto(instance.Service.Protocol),
-		"daddr": instance.Destination.Address.String(),
-		"dport": instance.Destination.Port,
-
-		"pport":      c.Port,
-		"status":     updown(ok),
-		"diagnostic": s,
-	}
-
-	switch c.Type {
-	case "dns":
-		if c.Method {
-			kv["method"] = "tcp"
-		} else {
-			kv["method"] = "udp"
-		}
-	case "http":
-		fallthrough
-	case "https":
-		if c.Method {
-			kv["method"] = "GET"
-		} else {
-			kv["method"] = "HEAD"
-		}
-
-		if c.Host != "" {
-			kv["host"] = c.Host
-		}
-
-		if c.Path != "" {
-			kv["path"] = c.Path
-		}
-
-		if len(c.Expect) > 0 {
-			kv["expect"] = fmt.Sprintf("%v", c.Expect)
-		}
-	}
-
-	return kv
 }
