@@ -26,6 +26,11 @@ import (
 	"net/netip"
 	"sync"
 
+	"bufio"
+	"os"
+	"regexp"
+	"strconv"
+
 	"github.com/davidcoles/cue"
 	"github.com/davidcoles/cue/mon"
 
@@ -34,12 +39,6 @@ import (
 	"github.com/lrh3321/ipset-go"
 	"github.com/vishvananda/netlink"
 )
-
-type tuple struct {
-	addr netip.Addr
-	port uint16
-	prot uint8
-}
 
 type Balancer struct {
 	Client ipvs.Client
@@ -83,7 +82,7 @@ func (b *Balancer) _vips() map[netip.Addr]bool {
 	vips := map[netip.Addr]bool{}
 
 	for t, _ := range b.state {
-		vips[t.addr] = true
+		vips[t.Address] = true
 	}
 
 	return vips
@@ -111,23 +110,23 @@ func ipsetEntry(t tuple) *ipset.Entry {
 
 	var ip net.IP
 
-	if t.addr.Is4() {
-		ip4 := t.addr.As4()
+	if t.Address.Is4() {
+		ip4 := t.Address.As4()
 		ip = ip4[:]
-	} else if t.addr.Is6() {
-		ip6 := t.addr.As16()
+	} else if t.Address.Is6() {
+		ip6 := t.Address.As16()
 		ip = ip6[:]
 	} else {
 		return nil
 	}
 
-	return &ipset.Entry{IP: ip, Port: &(t.port), Protocol: &(t.prot), Replace: true}
+	return &ipset.Entry{IP: ip, Port: &(t.Port), Protocol: &(t.Protocol), Replace: true}
 }
 
 func mapServices(services []cue.Service) map[tuple]cue.Service {
 	target := map[tuple]cue.Service{}
 	for _, s := range services {
-		target[tuple{addr: s.Address, port: s.Port, prot: s.Protocol}] = s
+		target[tuple{Address: s.Address, Port: s.Port, Protocol: s.Protocol}] = s
 	}
 	return target
 }
@@ -158,7 +157,7 @@ func (b *Balancer) Configure(services []cue.Service) error {
 	b.state = mapServices(services) // update state for next time
 
 	for t, _ := range todo {
-		delete(vipsToRemove, t.addr) // don't remove required vips
+		delete(vipsToRemove, t.Address) // don't remove required vips
 	}
 
 	svcs, _ := b.Client.Services()
@@ -168,7 +167,7 @@ func (b *Balancer) Configure(services []cue.Service) error {
 			continue
 		}
 
-		key := tuple{addr: s.Service.Address, port: s.Service.Port, prot: uint8(s.Service.Protocol)}
+		key := tuple{Address: s.Service.Address, Port: s.Service.Port, Protocol: uint8(s.Service.Protocol)}
 
 		if t, wanted := todo[key]; !wanted {
 
@@ -231,7 +230,7 @@ func (b *Balancer) destinations(s ipvs.Service, destinations []cue.Destination) 
 	target := map[ipport]cue.Destination{}
 
 	for _, d := range destinations {
-		target[ipport{Addr: d.Address, Port: d.Port}] = d
+		target[ipport{Address: d.Address, Port: d.Port}] = d
 	}
 
 	dsts, err := b.Client.Destinations(s)
@@ -243,7 +242,7 @@ func (b *Balancer) destinations(s ipvs.Service, destinations []cue.Destination) 
 
 	for _, d := range dsts {
 
-		key := ipport{Addr: d.Address, Port: d.Port}
+		key := ipport{Address: d.Address, Port: d.Port}
 
 		if t, wanted := target[key]; !wanted {
 
@@ -440,3 +439,128 @@ func proto(p uint8) string {
 	}
 	return fmt.Sprintf("%d", p)
 }
+
+func foo() {
+
+	type l4 struct {
+		ip   netip.Addr
+		port uint16
+	}
+
+	type key struct {
+		unto l4
+		dest l4
+	}
+
+	type stats struct {
+		SYN_RECV    uint
+		ESTABLISHED uint
+		CLOSE       uint
+		TIME_WAIT   uint
+	}
+
+	re := regexp.MustCompile(`^(TCP)\s+([0-9A-F]+)\s+([0-9A-F]+)\s+([0-9A-F]+)\s+([0-9A-F]+)\s+([0-9A-F]+)\s+([0-9A-F]+)\s+(\S+)\s+(\d+)$`)
+
+	file, err := os.OpenFile("/proc/net/ip_vs_conn", os.O_RDONLY, os.ModePerm)
+	if err != nil {
+		return
+	}
+	defer file.Close()
+
+	s := bufio.NewScanner(file)
+
+	//now := time.Now()
+
+	foo := map[key]stats{}
+
+	for s.Scan() {
+		line := s.Text()
+
+		m := re.FindStringSubmatch(line)
+
+		if len(m) != 10 {
+			continue
+		}
+
+		fromIP, _ := ip4(m[2])
+		untoIP, _ := ip4(m[4])
+		destIP, _ := ip4(m[6])
+
+		fromPort, _ := port(m[3])
+		untoPort, _ := port(m[5])
+		destPort, _ := port(m[7])
+
+		state := m[8]
+		count, _ := strconv.ParseInt(m[9], 10, 64)
+
+		if false {
+			fmt.Printf("%5d %11s %s:%d -> %s:%d (%s:%d)\n", count, state, fromIP, fromPort, untoIP, untoPort, destIP, destPort)
+		}
+
+		//foo[state]++
+
+		k := key{unto: l4{ip: untoIP, port: untoPort}, dest: l4{ip: destIP, port: destPort}}
+		v := foo[k]
+
+		switch state {
+		case "SYN_RECV":
+			v.SYN_RECV++
+		case "ESTABLISHED":
+			v.ESTABLISHED++
+		case "CLOSE":
+			v.CLOSE++
+		case "TIME_WAIT":
+			v.TIME_WAIT++
+		}
+
+		foo[k] = v
+
+	}
+
+	//fmt.Println(time.Now().Sub(now))
+
+	for k, v := range foo {
+		fmt.Printf("%s:%d -> %s:%d %v\n", k.unto.ip, k.unto.port, k.dest.ip, k.dest.port, v)
+	}
+}
+
+func ip4(s string) (r netip.Addr, b bool) {
+	nl, err := strconv.ParseInt(s, 16, 64)
+	if err != nil {
+		return r, false
+	}
+
+	var i [4]byte
+	i[0] = byte(nl >> 24 % 256)
+	i[1] = byte(nl >> 16 % 256)
+	i[2] = byte(nl >> 8 % 256)
+	i[3] = byte(nl % 256)
+
+	return netip.AddrFrom4(i), true
+}
+
+func port(s string) (r uint16, b bool) {
+	ns, err := strconv.ParseInt(s, 16, 64)
+	if err != nil {
+		return r, false
+	}
+
+	if ns > 65535 || ns < 0 {
+		return r, false
+	}
+
+	return uint16(ns), true
+}
+
+/*
+Pro FromIP   FPrt ToIP     TPrt DestIP   DPrt State       Expires PEName PEData
+TCP D921C71D C221 51143165 01BB 0A756A0C 01BB ESTABLISHED     857
+TCP 3627FC45 FC15 51143192 01BB 0A75661E 01BB SYN_RECV          9
+TCP D921C71D DA1F 51143165 01BB 0A756A0C 01BB ESTABLISHED     819
+TCP D921C71D ED4B 51143165 01BB 0A756A0C 01BB ESTABLISHED     815
+TCP D921C71D 901E 51143165 01BB 0A756A0C 01BB TIME_WAIT       115
+TCP D921C719 A49E 51143165 01BB 0A756A0C 01BB ESTABLISHED     891
+TCP D921C71B 92AC 51143165 01BB 0A756A0C 01BB TIME_WAIT        94
+TCP D921C71D BBB3 51143165 01BB 0A756A0C 01BB ESTABLISHED     848
+TCP 0A750241 A6EE 5114316F 1F91 0A756A0B 1F91 TIME_WAIT        52
+*/

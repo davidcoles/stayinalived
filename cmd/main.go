@@ -143,14 +143,7 @@ func main() {
 	}
 
 	director := &cue.Director{
-		//Logger:   logs.sub("director"),
 		Balancer: balancer,
-		//Balancer: &Balancer{
-		//	Client: client,
-		//	Logger: logs.sub("ipvs"),
-		//	Link:   link,
-		//	IPSet:  *ipset,
-		//},
 	}
 
 	err = director.Start(config.parse())
@@ -437,7 +430,7 @@ func serviceStatus(config *Config, client Client, director *cue.Director, old ma
 		xs := lb.Service{Address: svc.Address, Port: svc.Port, Protocol: lb.Protocol(svc.Protocol), Family: lb.INET}
 		xse, _ := client.Service(xs)
 
-		t := Tuple{Addr: svc.Address, Port: svc.Port, Protocol: svc.Protocol}
+		t := Tuple{Address: svc.Address, Port: svc.Port, Protocol: svc.Protocol}
 		cnf, _ := config.Services[t]
 
 		available := svc.Available()
