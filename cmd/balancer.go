@@ -20,7 +20,6 @@ package main
 
 import (
 	"encoding/json"
-	//"errors"
 	"fmt"
 	"net"
 	"net/netip"
@@ -182,7 +181,6 @@ func (b *Balancer) Configure(services []cue.Service) error {
 			}
 
 		} else {
-
 			service := ipvsService(t)
 
 			if service != s.Service {
@@ -286,9 +284,14 @@ func (b *Balancer) destinations(s ipvs.Service, destinations []cue.Destination) 
 
 func ipvsService(s cue.Service) ipvs.Service {
 
-	scheduler := "wrr"
-	flags := ipvs.ServiceHashed //ipvs.ServicePersistent | ipvs.ServiceHashed
+	scheduler, flags, _ := ipvsScheduler(s.Scheduler, s.Sticky)
 	netmask := netmask.MaskFrom4([4]byte{255, 255, 255, 255})
+
+	family := ipvs.INET
+
+	if s.Address.Is6() {
+		family = ipvs.INET6
+	}
 
 	return ipvs.Service{
 		Address:   s.Address,
@@ -297,17 +300,24 @@ func ipvsService(s cue.Service) ipvs.Service {
 		Netmask:   netmask,
 		Scheduler: scheduler,
 		Flags:     flags,
-		Family:    ipvs.INET,
+		Family:    family,
 		//Timeout:   uint32,
 		//FWMark:    uint32,
 	}
 }
 
 func ipvsDestination(d cue.Destination) ipvs.Destination {
+
+	family := ipvs.INET
+
+	if d.Address.Is6() {
+		family = ipvs.INET6
+	}
+
 	return ipvs.Destination{
 		Address:   d.Address,
 		Port:      d.Port,
-		Family:    ipvs.INET,
+		Family:    family,
 		FwdMethod: ipvs.Masquerade,
 		Weight:    uint32(d.HealthyWeight()),
 		//UpperThreshold: uint32,
@@ -440,7 +450,7 @@ func proto(p uint8) string {
 	return fmt.Sprintf("%d", p)
 }
 
-func foo() {
+func ip_vs_conn() {
 
 	type l4 struct {
 		ip   netip.Addr
@@ -564,3 +574,45 @@ TCP D921C71B 92AC 51143165 01BB 0A756A0C 01BB TIME_WAIT        94
 TCP D921C71D BBB3 51143165 01BB 0A756A0C 01BB ESTABLISHED     848
 TCP 0A750241 A6EE 5114316F 1F91 0A756A0B 1F91 TIME_WAIT        52
 */
+
+func ipvsScheduler(scheduler string, sticky bool) (string, ipvs.Flags, error) {
+	// rr    - Round Robin
+	// wrr   - Weighted Round Robin
+	// lc    - Least-Connection
+	// wlc   - Weighted  Least-Connection
+	// lblc  - Locality-Based Least-Connection
+	// lblcr - Locality-Based Least-Connection with Replication
+	// dh    - Destination Hashing
+	// sh    - Source Hashing: sh-fallback, sh-port
+	// sed   - Shortest Expected Delay
+	// nq    - Never Queue
+	// fo    - Weighted Failover
+	// ovf   - Weighted Overflow
+	// mh    - Maglev Hashing: mh-fallback, mh-port
+
+	const (
+		MH_FALLBACK = ipvs.ServiceSchedulerOpt1
+		MH_PORT     = ipvs.ServiceSchedulerOpt2
+	)
+
+	// ipvs.ServiceHashed seems to get set by default - set this or we
+	// will have to update the service every time
+	var flags ipvs.Flags = ipvs.ServiceHashed
+
+	if sticky {
+		flags |= ipvs.ServicePersistent
+	}
+
+	switch scheduler {
+	case "":
+		return "wlc", flags, nil
+	case "roundrobin":
+		return "wrr", flags, nil
+	case "leastconns":
+		return "wlc", flags, nil
+	case "maglev":
+		return "mh", flags | MH_PORT | MH_FALLBACK, nil
+	}
+
+	return "wlc", flags, fmt.Errorf("%s is not a valid scheduler name", scheduler)
+}

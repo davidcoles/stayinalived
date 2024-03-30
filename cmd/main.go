@@ -71,7 +71,11 @@ func main() {
 	config, err := Load(file)
 
 	if err != nil {
-		log.Fatal("Couldn't load config file:", config, err)
+		log.Fatal("Couldn't load config file:", err)
+	}
+
+	if err = validate(config); err != nil {
+		log.Fatal("Couldn't validate config file: ", err)
 	}
 
 	logs := &(config.Logging)
@@ -365,6 +369,7 @@ func main() {
 			w.WriteHeader(http.StatusInternalServerError)
 			return
 		}
+
 		w.Header().Set("Content-Type", "application/json")
 		w.Write(js)
 		w.Write([]byte("\n"))
@@ -394,16 +399,24 @@ func main() {
 			fallthrough
 		case syscall.SIGUSR2:
 			logs.NOTICE(F, "Reload signal received")
+
 			conf, err := Load(file)
-			if err == nil {
-				mutex.Lock()
-				config = conf
-				director.Configure(config.parse())
-				pool.Configure(config.BGP)
-				mutex.Unlock()
-			} else {
-				logs.ALERT(F, "Couldn't load config file:", file, err)
+
+			if err != nil {
+				logs.ALERT(F, "Couldn't load config file: ", file, err)
+				break
 			}
+
+			if err = validate(conf); err != nil {
+				logs.ALERT(F, "Couldn't validate config file: ", file, err)
+				break
+			}
+
+			mutex.Lock()
+			config = conf
+			director.Configure(config.parse())
+			pool.Configure(config.BGP)
+			mutex.Unlock()
 
 		case syscall.SIGTERM:
 			fallthrough
@@ -447,6 +460,8 @@ func serviceStatus(config *Config, client Client, director *cue.Director, old ma
 			Up:          svc.Up,
 			For:         uint64(time.Now().Sub(svc.When) / time.Second),
 			Stats:       old[key],
+			Sticky:      svc.Sticky,
+			Scheduler:   svc.Scheduler,
 		}
 		stats[key] = serv.Stats.update(xse.Stats)
 
@@ -534,4 +549,15 @@ func (s *Stats) update(u lb.Stats) Stats {
 	}
 
 	return *s
+}
+
+func validate(config *Config) error {
+
+	for t, s := range config.Services {
+		if _, _, err := ipvsScheduler(s.Scheduler, s.Sticky); err != nil {
+			return fmt.Errorf("Service %s : %s", t.string(), err.Error())
+		}
+	}
+
+	return nil
 }

@@ -1,8 +1,20 @@
 # stayinalived
 
-IPVS based loadbalancer: `make stayinalived`
+IPVS based loadbalancer: `cd cmd && make stayinalived`
 
-Very early work, not really for public consumption.
+This is a fork of the [vc5](https://github.com/davidcoles/vc5) load
+balancer which uses
+[IPVS](https://en.wikipedia.org/wiki/IP_Virtual_Server) instead of an
+[eBPF/XDP](https://github.com/davidcoles/xvs) based load balancing
+engine.
+
+Currently this operates in full NAT mode so, unlike with vc5, you need
+to do some work with iptables and friends to make this work (see
+garbled notes below).
+
+
+Changes in vc5 will be merged in to the code here frequently so new
+features such as logging improvements should appear in a timely manner.
 
 ## NOTES
 
@@ -33,15 +45,19 @@ iptables -A PREROUTING -t mangle -d 192.168.101.1/32 -p tcp --dport 80 -j MARK -
 iptables -A PREROUTING -t mangle -d 192.168.101.2/32 -p tcp --dport 80 -j MARK --set-mark 1
 ```
 
-I will probably do the iptables rules with an ipset that the LB will add/remove services from:
+I will probably do the iptables rules with an ipset that the LB will
+add/remove services from (indeed, this is implemented with the -s flag
+now, and the ipset will be created for you automatically):
 
 ```
 ipset create ipvs hash:ip,port
 iptables -A PREROUTING -t mangle -m set --match-set ipvs dst,dst -j MARK --set-mark 1
 ```
 
-create the addresses locally - IPVS doesn't seem to handle the traffic unless present.
-I would dearly like to know if it is possible to avoid this
+create the addresses locally - IPVS doesn't seem to handle the traffic
+unless present.  I would dearly like to know if it is possible to
+avoid this - the -i flag now indicates an interface on which addresses
+will be automatically added/removed.
 
 ```
 ip link add ipvs type dummy
@@ -53,33 +69,22 @@ ip a add 192.168.101.5/32 dev ipvs
 ```
 
 
-To mitigate port exhaustion with SNAT, it might be an idea to add some
-extra IP addresses to use exclusively for NAT purposes. To balance
-between them we could use a netmask:
+To mitigate port exhaustion with SNAT, it might be an idea to add an
+extra IP addresses to use exclusively for NAT purposes.
 
 ```
-iptables -t nat -A POSTROUTING -m ipvs --ipvs -j SNAT --to-source 10.1.2.10 -s 0.0.0.0/0.0.0.1
-iptables -t nat -A POSTROUTING -m ipvs --ipvs -j SNAT --to-source 10.1.2.11 -s 0.0.0.1/0.0.0.1
+iptables -t nat -A POSTROUTING -m ipvs --ipvs -j SNAT --to-source 10.1.2.10
 ```
 
-We'd need a power of two addresses for (hopefully) equal allocation:
+
+TCP MSS adjustment??
 
 ```
-iptables -t nat -A POSTROUTING -m ipvs --ipvs -j SNAT --to-source 10.1.2.10 -s 0.0.0.0/0.0.0.3
-iptables -t nat -A POSTROUTING -m ipvs --ipvs -j SNAT --to-source 10.1.2.11 -s 0.0.0.1/0.0.0.3
-iptables -t nat -A POSTROUTING -m ipvs --ipvs -j SNAT --to-source 10.1.2.12 -s 0.0.0.2/0.0.0.3
-iptables -t nat -A POSTROUTING -m ipvs --ipvs -j SNAT --to-source 10.1.2.13 -s 0.0.0.3/0.0.0.3
-```
-
-Maybe there's an easier way - answers on a postcard, please!
-
-
-iptables -t nat -A POSTROUTING -m ipvs --ipvs -j SNAT --to-source 10.7.115.99 ! -p 4
-
 iptables -t mangle -A FORWARD -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss 1440 -m set --match-set ipip src,src
 
-
 ```
+
+
 cat >>/etc/modules <<EOF
 ip_vs_wlc
 ip_vs_mh
