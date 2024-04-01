@@ -54,7 +54,11 @@ ipset create ipvs hash:ip,port
 iptables -A PREROUTING -t mangle -m set --match-set ipvs dst,dst -j MARK --set-mark 1
 ```
 
-create the addresses locally - IPVS doesn't seem to handle the traffic
+You could now add an accept rule to packets matching the 'ipvs' set
+and then drop all other packets to the VIPs.
+
+
+Create the VIP addresses locally - IPVS doesn't seem to handle the traffic
 unless present.  I would dearly like to know if it is possible to
 avoid this - the -i flag now indicates an interface on which addresses
 will be automatically added/removed.

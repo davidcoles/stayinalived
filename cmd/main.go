@@ -39,6 +39,7 @@ import (
 
 	"github.com/davidcoles/cue"
 	"github.com/davidcoles/cue/bgp"
+	"github.com/davidcoles/cue/mon"
 
 	lb "github.com/cloudflare/ipvs"
 	"github.com/vishvananda/netlink"
@@ -164,7 +165,7 @@ func main() {
 	var rib []netip.Addr
 	var summary Summary
 
-	services, old, _ := serviceStatus(config, client, director, nil)
+	services, old, _ := serviceStatus(config, balancer, director, nil)
 
 	go func() {
 		ticker := time.NewTicker(time.Minute)
@@ -185,7 +186,7 @@ func main() {
 		for {
 			mutex.Lock()
 			summary.update(client, uint64(time.Now().Sub(start)/time.Second))
-			services, old, summary.Current = serviceStatus(config, client, director, old)
+			services, old, summary.Current = serviceStatus(config, balancer, director, old)
 			mutex.Unlock()
 			select {
 			case <-ticker.C:
@@ -431,24 +432,24 @@ func main() {
 	}
 }
 
-func serviceStatus(config *Config, client Client, director *cue.Director, old map[Key]Stats) (map[VIP][]Serv, map[Key]Stats, uint64) {
+func serviceStatus(config *Config, balancer *Balancer, director *cue.Director, old map[mon.Instance]Stats) (map[netip.Addr][]Serv, map[mon.Instance]Stats, uint64) {
 
 	var current uint64
 
-	stats := map[Key]Stats{}
-	status := map[VIP][]Serv{}
+	stats := map[mon.Instance]Stats{}
+	status := map[netip.Addr][]Serv{}
+	tcpstats := balancer.TCPStats()
 
 	for _, svc := range director.Status() {
-
-		xs := lb.Service{Address: svc.Address, Port: svc.Port, Protocol: lb.Protocol(svc.Protocol), Family: lb.INET}
-		xse, _ := client.Service(xs)
 
 		t := Tuple{Address: svc.Address, Port: svc.Port, Protocol: svc.Protocol}
 		cnf, _ := config.Services[t]
 
 		available := svc.Available()
 
-		key := Key{VIP: svc.Address, Port: svc.Port, Protocol: svc.Protocol}
+		key := balancer.ServiceInstance(svc)
+		xse, _ := balancer.Service(svc)
+
 		serv := Serv{
 			Name:        cnf.Name,
 			Description: cnf.Description,
@@ -459,41 +460,43 @@ func serviceStatus(config *Config, client Client, director *cue.Director, old ma
 			Available:   available,
 			Up:          svc.Up,
 			For:         uint64(time.Now().Sub(svc.When) / time.Second),
-			Stats:       old[key],
 			Sticky:      svc.Sticky,
 			Scheduler:   svc.Scheduler,
+			Stats:       calculateRate(balancer.Stats(xse.Stats), old[key]),
 		}
-		stats[key] = serv.Stats.update(xse.Stats)
 
-		lbs := map[netip.Addr]lb.Stats{}
+		lbs := map[mon.Destination]Stats{}
 
-		xd, _ := client.Destinations(xs)
+		xd, _ := balancer.Destinations(svc)
 		for _, d := range xd {
-			lbs[d.Destination.Address] = d.Stats
+			lbs[mon.Destination{Address: d.Address, Port: d.Port}] = balancer.Stats(d.Stats)
 		}
 
 		for _, dst := range svc.Destinations {
-			status := dst.Status
-
-			key := Key{
-				VIP: svc.Address, Port: svc.Port, Protocol: svc.Protocol,
-				RIP: dst.Address, RPort: dst.Port,
-			}
+			key := balancer.DestinationInstance(svc, dst)
 			dest := Dest{
 				Address:    dst.Address,
 				Port:       dst.Port,
 				Disabled:   dst.Disabled,
-				Up:         status.OK,
-				For:        uint64(time.Now().Sub(status.When) / time.Second),
-				Took:       uint64(status.Took / time.Millisecond),
-				Diagnostic: status.Diagnostic,
+				Up:         dst.Status.OK,
+				For:        uint64(time.Now().Sub(dst.Status.When) / time.Second),
+				Took:       uint64(dst.Status.Took / time.Millisecond),
+				Diagnostic: dst.Status.Diagnostic,
 				Weight:     dst.Weight,
-				Stats:      old[key],
+				Stats:      calculateRate(lbs[balancer.Destination(dst)], old[key]),
 			}
-			stats[key] = dest.Stats.update(lbs[dst.Address])
 
+			if tcp, ok := tcpstats[key]; ok {
+				dest.Stats.Current = tcp.ESTABLISHED
+				serv.Stats.Current += tcp.ESTABLISHED
+				current += tcp.ESTABLISHED
+			}
+
+			stats[key] = dest.Stats
 			serv.Destinations = append(serv.Destinations, dest)
 		}
+
+		stats[key] = serv.Stats
 
 		sort.SliceStable(serv.Destinations, func(i, j int) bool {
 			return serv.Destinations[i].Address.Compare(serv.Destinations[j].Address) < 0
@@ -525,15 +528,8 @@ func (s *Summary) summary(c Client) {
 	s.Flows = u.Flows
 }
 
-func (s *Stats) update(u lb.Stats) Stats {
-	o := *s
+func calculateRate(s Stats, o Stats) Stats {
 
-	s.IngressOctets = u.IncomingBytes
-	s.IngressPackets = u.IncomingPackets
-	s.EgressOctets = u.OutgoingBytes
-	s.EgressPackets = u.OutgoingPackets
-	s.Flows = u.Connections
-	//s.Current = u.Current
 	s.time = time.Now()
 
 	if o.time.Unix() != 0 {
@@ -548,7 +544,7 @@ func (s *Stats) update(u lb.Stats) Stats {
 		}
 	}
 
-	return *s
+	return s
 }
 
 func validate(config *Config) error {

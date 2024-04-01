@@ -450,7 +450,14 @@ func proto(p uint8) string {
 	return fmt.Sprintf("%d", p)
 }
 
-func ip_vs_conn() {
+type tcpstats struct {
+	SYN_RECV    uint64
+	ESTABLISHED uint64
+	CLOSE       uint64
+	TIME_WAIT   uint64
+}
+
+func (b *Balancer) TCPStats() map[mon.Instance]tcpstats {
 
 	type l4 struct {
 		ip   netip.Addr
@@ -462,26 +469,17 @@ func ip_vs_conn() {
 		dest l4
 	}
 
-	type stats struct {
-		SYN_RECV    uint
-		ESTABLISHED uint
-		CLOSE       uint
-		TIME_WAIT   uint
-	}
-
 	re := regexp.MustCompile(`^(TCP)\s+([0-9A-F]+)\s+([0-9A-F]+)\s+([0-9A-F]+)\s+([0-9A-F]+)\s+([0-9A-F]+)\s+([0-9A-F]+)\s+(\S+)\s+(\d+)$`)
+
+	foo := map[mon.Instance]tcpstats{}
 
 	file, err := os.OpenFile("/proc/net/ip_vs_conn", os.O_RDONLY, os.ModePerm)
 	if err != nil {
-		return
+		return foo
 	}
 	defer file.Close()
 
 	s := bufio.NewScanner(file)
-
-	//now := time.Now()
-
-	foo := map[key]stats{}
 
 	for s.Scan() {
 		line := s.Text()
@@ -492,25 +490,36 @@ func ip_vs_conn() {
 			continue
 		}
 
-		fromIP, _ := ip4(m[2])
+		nilIP, _ := ip4("00000000")
+
+		//fromIP, _ := ip4(m[2])
 		untoIP, _ := ip4(m[4])
 		destIP, _ := ip4(m[6])
 
-		fromPort, _ := port(m[3])
+		//fromPort, _ := port(m[3])
 		untoPort, _ := port(m[5])
 		destPort, _ := port(m[7])
 
-		state := m[8]
-		count, _ := strconv.ParseInt(m[9], 10, 64)
-
-		if false {
-			fmt.Printf("%5d %11s %s:%d -> %s:%d (%s:%d)\n", count, state, fromIP, fromPort, untoIP, untoPort, destIP, destPort)
+		if untoIP == nilIP || destIP == nilIP || untoPort == 0 || destPort == 0 {
+			continue
 		}
 
-		//foo[state]++
+		instance := mon.Instance{
+			Service: mon.Service{
+				Address:  untoIP,
+				Port:     untoPort,
+				Protocol: TCP,
+			},
+			Destination: mon.Destination{
+				Address: destIP,
+				Port:    destPort,
+			},
+		}
 
-		k := key{unto: l4{ip: untoIP, port: untoPort}, dest: l4{ip: destIP, port: destPort}}
-		v := foo[k]
+		state := m[8]
+		//count, _ := strconv.ParseInt(m[9], 10, 64)
+
+		v := foo[instance]
 
 		switch state {
 		case "SYN_RECV":
@@ -523,15 +532,15 @@ func ip_vs_conn() {
 			v.TIME_WAIT++
 		}
 
-		foo[k] = v
+		foo[instance] = v
 
 	}
 
-	//fmt.Println(time.Now().Sub(now))
+	//for k, v := range foo {
+	//	fmt.Printf("%s:%d -> %s:%d %v\n", k.Service.Address, k.Service.Port, k.Destination.Address, k.Destination.Port, v)
+	//}
 
-	for k, v := range foo {
-		fmt.Printf("%s:%d -> %s:%d %v\n", k.unto.ip, k.unto.port, k.dest.ip, k.dest.port, v)
-	}
+	return foo
 }
 
 func ip4(s string) (r netip.Addr, b bool) {
@@ -561,19 +570,6 @@ func port(s string) (r uint16, b bool) {
 
 	return uint16(ns), true
 }
-
-/*
-Pro FromIP   FPrt ToIP     TPrt DestIP   DPrt State       Expires PEName PEData
-TCP D921C71D C221 51143165 01BB 0A756A0C 01BB ESTABLISHED     857
-TCP 3627FC45 FC15 51143192 01BB 0A75661E 01BB SYN_RECV          9
-TCP D921C71D DA1F 51143165 01BB 0A756A0C 01BB ESTABLISHED     819
-TCP D921C71D ED4B 51143165 01BB 0A756A0C 01BB ESTABLISHED     815
-TCP D921C71D 901E 51143165 01BB 0A756A0C 01BB TIME_WAIT       115
-TCP D921C719 A49E 51143165 01BB 0A756A0C 01BB ESTABLISHED     891
-TCP D921C71B 92AC 51143165 01BB 0A756A0C 01BB TIME_WAIT        94
-TCP D921C71D BBB3 51143165 01BB 0A756A0C 01BB ESTABLISHED     848
-TCP 0A750241 A6EE 5114316F 1F91 0A756A0B 1F91 TIME_WAIT        52
-*/
 
 func ipvsScheduler(scheduler string, sticky bool) (string, ipvs.Flags, error) {
 	// rr    - Round Robin
@@ -615,4 +611,40 @@ func ipvsScheduler(scheduler string, sticky bool) (string, ipvs.Flags, error) {
 	}
 
 	return "wlc", flags, fmt.Errorf("%s is not a valid scheduler name", scheduler)
+}
+
+func (b *Balancer) Stats(s ipvs.Stats) (r Stats) {
+
+	r.IngressOctets = s.IncomingBytes
+	r.IngressPackets = s.IncomingPackets
+	r.EgressOctets = s.OutgoingBytes
+	r.EgressPackets = s.OutgoingPackets
+	r.Flows = s.Connections
+
+	return r
+}
+
+func (b *Balancer) Service(s cue.Service) (ipvs.ServiceExtended, error) {
+	xs := ipvs.Service{Address: s.Address, Port: s.Port, Protocol: ipvs.Protocol(s.Protocol), Family: ipvs.INET}
+	return b.Client.Service(xs)
+}
+
+func (b *Balancer) Destinations(s cue.Service) ([]ipvs.DestinationExtended, error) {
+	xs := ipvs.Service{Address: s.Address, Port: s.Port, Protocol: ipvs.Protocol(s.Protocol), Family: ipvs.INET}
+	return b.Client.Destinations(xs)
+}
+
+func (b *Balancer) Destination(dst cue.Destination) mon.Destination {
+	return mon.Destination{Address: dst.Address, Port: dst.Port}
+}
+
+func (b *Balancer) ServiceInstance(s cue.Service) mon.Instance {
+	return mon.Instance{Service: mon.Service{Address: s.Address, Port: s.Port, Protocol: s.Protocol}}
+}
+
+func (b *Balancer) DestinationInstance(s cue.Service, d cue.Destination) mon.Instance {
+	return mon.Instance{
+		Service:     mon.Service{Address: s.Address, Port: s.Port, Protocol: s.Protocol},
+		Destination: mon.Destination{Address: d.Address, Port: d.Port},
+	}
 }

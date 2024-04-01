@@ -59,7 +59,7 @@ type Dest struct {
 	MAC        string     `json:"mac"`
 }
 
-type Key struct {
+type xKey struct {
 	VIP      netip.Addr
 	RIP      netip.Addr
 	Port     uint16
@@ -133,10 +133,10 @@ func (s *Stats) add(x Stats) {
 
 type VIP = netip.Addr
 type VIPStats struct {
-	VIP   VIP    `json:"vip"`
-	Up    bool   `json:"up"`
-	Stats Stats  `json:"stats"`
-	For   uint64 `json:"for"`
+	VIP   netip.Addr `json:"vip"`
+	Up    bool       `json:"up"`
+	Stats Stats      `json:"stats"`
+	For   uint64     `json:"for"`
 }
 
 func vipStatus_(in map[VIP][]Serv, rib []netip.Addr) (out []VIPStats) {
