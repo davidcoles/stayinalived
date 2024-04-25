@@ -604,7 +604,7 @@ func ipvsScheduler(scheduler string, sticky bool) (string, ipvs.Flags, error) {
 		return "wlc", flags, nil
 	case "roundrobin":
 		return "wrr", flags, nil
-	case "leastconns":
+	case "leastconn":
 		return "wlc", flags, nil
 	case "maglev":
 		return "mh", flags | MH_PORT | MH_FALLBACK, nil
