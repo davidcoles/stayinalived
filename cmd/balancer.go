@@ -49,6 +49,25 @@ type Balancer struct {
 	state map[tuple]cue.Service
 }
 
+func (b *Balancer) Dest(s ipvs.Service, d ipvs.Destination) mon.Destination {
+	return mon.Destination{Address: d.Address, Port: s.Port}
+}
+
+func (b *Balancer) summary() (r Summary) {
+
+	services, _ := b.Client.Services()
+
+	for _, s := range services {
+		r.IngressOctets += s.Stats.IncomingBytes
+		r.IngressPackets += s.Stats.IncomingPackets
+		r.EgressOctets += s.Stats.OutgoingBytes
+		r.EgressPackets += s.Stats.OutgoingPackets
+		r.Flows += s.Stats.Connections
+	}
+
+	return
+}
+
 type Client = ipvs.Client
 
 func NewClient() (ipvs.Client, error) {
