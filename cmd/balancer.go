@@ -469,11 +469,15 @@ func proto(p uint8) string {
 	return fmt.Sprintf("%d", p)
 }
 
-type tcpstats struct {
-	SYN_RECV    uint64
-	ESTABLISHED uint64
-	CLOSE       uint64
-	TIME_WAIT   uint64
+//type tcpstats struct {
+//	SYN_RECV    uint64
+//	ESTABLISHED uint64
+//	CLOSE       uint64
+//	TIME_WAIT   uint64
+//}
+
+func (b *Balancer) MAC(d ipvs.DestinationExtended) string {
+	return ""
 }
 
 func (b *Balancer) TCPStats() map[mon.Instance]tcpstats {

@@ -303,14 +303,14 @@ func serviceStatus(config *Config, balancer *Balancer, director *cue.Director, o
 		}
 
 		lbs := map[mon.Destination]Stats{}
-		//mac := map[mon.Destination]string{}
+		mac := map[mon.Destination]string{}
 
 		de, _ := balancer.Destinations(svc)
 		for _, d := range de {
 			//key := mon.Destination{Address: d.Destination.Address, Port: svc.Port}
 			key := balancer.Dest(xse.Service, d.Destination)
 			lbs[key] = balancer.Stats(d.Stats)
-			//mac[key] = balancer.MAC(d)
+			mac[key] = balancer.MAC(d)
 		}
 
 		for _, dst := range svc.Destinations {
@@ -325,7 +325,7 @@ func serviceStatus(config *Config, balancer *Balancer, director *cue.Director, o
 				Diagnostic: dst.Status.Diagnostic,
 				Weight:     dst.Weight,
 				Stats:      calculateRate(lbs[balancer.Destination(dst)], old[key]),
-				//MAC:        mac[balancer.Destination(dst)],
+				MAC:        mac[balancer.Destination(dst)],
 			}
 
 			if tcp, ok := tcpstats[key]; ok {
@@ -369,11 +369,9 @@ func calculateRate(s Stats, o Stats) Stats {
 	return s
 }
 
-/*
 type tcpstats struct {
 	SYN_RECV    uint64
 	ESTABLISHED uint64
 	CLOSE       uint64
 	TIME_WAIT   uint64
 }
-*/
