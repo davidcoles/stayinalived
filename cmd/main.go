@@ -146,7 +146,7 @@ func main() {
 	}
 
 	director := &cue.Director{
-		Balancer: balancer,
+		Notifier: balancer,
 	}
 
 	err = director.Start(config.parse())
@@ -213,7 +213,11 @@ func main() {
 			select {
 			case <-ticker.C: // check for matured VIPs
 			case <-director.C: // a backend has changed state
+				//services = director.Status()
+				mutex.Lock()
 				services = director.Status()
+				balancer.configure(services)
+				mutex.Unlock()
 			case <-done: // shuting down
 				return
 			case <-timer.C:

@@ -149,24 +149,7 @@ func mapServices(services []cue.Service) map[tuple]cue.Service {
 	return target
 }
 
-func (b *Balancer) Probe(m *mon.Mon, i mon.Instance, c mon.Check) (ok bool, diag string) {
-
-	ok, diag = m.Probe(i.Destination.Address, c) // probe using mon interface; we intercept the result so that we can log it
-
-	if logger := b.Logger; logger != nil {
-		logger.DEBUG("probing", probeLog(i, c, ok, diag))
-	}
-
-	return
-}
-
-func (b *Balancer) Notify(instance mon.Instance, state bool) {
-	if logger := b.Logger; logger != nil {
-		logger.NOTICE("notify", notifyLog(instance, state))
-	}
-}
-
-func (b *Balancer) Configure(services []cue.Service) error {
+func (b *Balancer) configure(services []cue.Service) error {
 	b.mutex.Lock()
 	defer b.mutex.Unlock()
 
@@ -402,80 +385,6 @@ func (l *LE) log() (string, KV)        { return l.f, l.k }
 func (l *LE) err(e error) (string, KV) { l.k["error"] = e.Error(); return l.log() }
 func (l *LE) add(k string, e any) *LE  { l.k[k] = e; return l }
 
-func probeLog(instance mon.Instance, check mon.Check, status bool, reason string) map[string]any {
-
-	kv := map[string]any{
-		"reason": reason,
-		"status": updown(status),
-		"proto":  proto(instance.Service.Protocol),
-		"saddr":  instance.Service.Address.String(),
-		"sport":  instance.Service.Port,
-		"daddr":  instance.Destination.Address.String(),
-		"dport":  instance.Destination.Port,
-		"probe":  check.Type,
-		"pport":  check.Port,
-	}
-
-	switch check.Type {
-	case "dns":
-		if check.Method {
-			kv["method"] = "tcp"
-		} else {
-			kv["method"] = "udp"
-		}
-	case "http":
-		fallthrough
-	case "https":
-		if check.Method {
-			kv["method"] = "HEAD"
-		} else {
-			kv["method"] = "GET"
-		}
-
-		if check.Host != "" {
-			kv["host"] = check.Host
-		}
-
-		if check.Path != "" {
-			kv["path"] = check.Path
-		}
-
-		if len(check.Expect) > 0 {
-			kv["expect"] = fmt.Sprintf("%v", check.Expect)
-		}
-	}
-
-	return kv
-}
-
-func notifyLog(instance mon.Instance, status bool) map[string]any {
-	return map[string]any{
-		"status": updown(status),
-		"proto":  proto(instance.Service.Protocol),
-		"saddr":  instance.Service.Address.String(),
-		"sport":  instance.Service.Port,
-		"daddr":  instance.Destination.Address.String(),
-		"dport":  instance.Destination.Port,
-	}
-}
-
-func proto(p uint8) string {
-	switch p {
-	case TCP:
-		return "tcp"
-	case UDP:
-		return "udp"
-	}
-	return fmt.Sprintf("%d", p)
-}
-
-//type tcpstats struct {
-//	SYN_RECV    uint64
-//	ESTABLISHED uint64
-//	CLOSE       uint64
-//	TIME_WAIT   uint64
-//}
-
 func (b *Balancer) MAC(d ipvs.DestinationExtended) string {
 	return ""
 }
@@ -670,4 +579,61 @@ func (b *Balancer) DestinationInstance(s cue.Service, d cue.Destination) mon.Ins
 		Service:     mon.Service{Address: s.Address, Port: s.Port, Protocol: s.Protocol},
 		Destination: mon.Destination{Address: d.Address, Port: d.Port},
 	}
+}
+
+// interface method called by mon when a destination's heatlh status transitions up or down
+func (b *Balancer) Notify(instance mon.Instance, state bool) {
+	if logger := b.Logger; logger != nil {
+		logger.NOTICE("notify", notifyLog(instance, state))
+	}
+}
+
+// interface method called by mon every time a round of checks for a destination is completed
+func (b *Balancer) Result(instance mon.Instance, state bool, diagnostic string) {
+	// return // we log all probes anyway - no need for this
+	if logger := b.Logger; logger != nil {
+		logger.DEBUG("result", resultLog(instance, state, diagnostic))
+	}
+}
+
+func (b *Balancer) Check(instance mon.Instance, check string, round uint64, state bool, diagnostic string) {
+	// return // we log all probes anyway - no need for this
+	if logger := b.Logger; logger != nil {
+		logger.DEBUG("check", checkLog(instance, state, diagnostic, check, round))
+	}
+}
+
+func notifyLog(instance mon.Instance, status bool) map[string]any {
+
+	proto := func(p uint8) string {
+		switch instance.Service.Protocol {
+		case TCP:
+			return "tcp"
+		case UDP:
+			return "udp"
+		}
+		return fmt.Sprintf("%d", p)
+	}
+
+	return map[string]any{
+		"state": updown(status),
+		"proto": proto(instance.Service.Protocol),
+		"saddr": instance.Service.Address.String(),
+		"sport": instance.Service.Port,
+		"daddr": instance.Destination.Address.String(),
+		"dport": instance.Destination.Port,
+	}
+}
+
+func resultLog(instance mon.Instance, status bool, diagnostic string) map[string]any {
+	r := notifyLog(instance, status)
+	r["diagnostic"] = diagnostic
+	return r
+}
+
+func checkLog(instance mon.Instance, status bool, diagnostic string, check string, round uint64) map[string]any {
+	r := resultLog(instance, status, diagnostic)
+	r["check"] = check
+	r["round"] = round
+	return r
 }
