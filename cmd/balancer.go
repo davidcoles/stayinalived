@@ -303,7 +303,7 @@ func ipvsService(s cue.Service) ipvs.Service {
 		Scheduler: scheduler,
 		Flags:     flags,
 		Family:    family,
-		//Timeout:   uint32,
+		Timeout:   s.Persist,
 		//FWMark:    uint32,
 	}
 }
@@ -539,7 +539,10 @@ func ipvsScheduler(scheduler string, sticky bool) (string, ipvs.Flags, error) {
 	case "leastconn":
 		return "wlc", flags, nil
 	case "maglev":
-		return "mh", flags | MH_PORT | MH_FALLBACK, nil
+		if sticky {
+			return "mh", flags | MH_FALLBACK, nil
+		}
+		return "mh", flags | MH_FALLBACK | MH_PORT, nil
 	}
 
 	return "wlc", flags, fmt.Errorf("%s is not a valid scheduler name", scheduler)
