@@ -184,6 +184,7 @@ func (b *Balancer) configure(services []cue.Service) error {
 
 		} else {
 			service := ipvsService(t)
+			drain := !t.Reset
 
 			if service != s.Service {
 				if err := b.Client.UpdateService(service); err != nil {
@@ -193,7 +194,7 @@ func (b *Balancer) configure(services []cue.Service) error {
 				}
 			}
 
-			b.destinations(s.Service, t.Destinations)
+			b.destinations(s.Service, drain, t.Destinations)
 
 			delete(todo, key) // no need to create as it exists - take off the todo list
 		}
@@ -202,6 +203,7 @@ func (b *Balancer) configure(services []cue.Service) error {
 	// create any non-existing services
 	for _, s := range todo {
 		service := ipvsService(s)
+		drain := !s.Reset
 
 		if err := b.Client.CreateService(service); err != nil {
 			b.ERR(logServCreate(service).err(err))
@@ -210,7 +212,7 @@ func (b *Balancer) configure(services []cue.Service) error {
 			b.INFO(logServCreate(service).log())
 		}
 
-		b.destinations(service, s.Destinations)
+		b.destinations(service, drain, s.Destinations)
 	}
 
 	// remove any addresses which are no longer active
@@ -225,12 +227,14 @@ func (b *Balancer) configure(services []cue.Service) error {
 	return nil
 }
 
-func (b *Balancer) destinations(s ipvs.Service, destinations []cue.Destination) error {
+func (b *Balancer) destinations(s ipvs.Service, drain bool, destinations []cue.Destination) error {
 
 	target := map[ipport]cue.Destination{}
 
 	for _, d := range destinations {
-		target[ipport{Address: d.Address, Port: d.Port}] = d
+		if drain || d.HealthyWeight() > 0 {
+			target[ipport{Address: d.Address, Port: d.Port}] = d
+		}
 	}
 
 	dsts, err := b.Client.Destinations(s)
