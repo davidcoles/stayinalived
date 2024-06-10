@@ -50,7 +50,7 @@ type Balancer struct {
 }
 
 func (b *Balancer) Dest(s ipvs.Service, d ipvs.Destination) mon.Destination {
-	return mon.Destination{Address: d.Address, Port: s.Port}
+	return mon.Destination{Address: d.Address, Port: d.Port}
 }
 
 func (b *Balancer) summary() (r Summary) {
