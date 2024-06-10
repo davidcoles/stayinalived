@@ -50,6 +50,7 @@ type Balancer struct {
 }
 
 func (b *Balancer) Dest(s ipvs.Service, d ipvs.Destination) mon.Destination {
+	// differs from DSR - dest port might be be different to service port
 	return mon.Destination{Address: d.Address, Port: d.Port}
 }
 
