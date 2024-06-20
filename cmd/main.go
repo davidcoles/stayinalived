@@ -60,6 +60,7 @@ func main() {
 	addr := flag.String("a", "", "address")
 	ipset := flag.String("s", "", "ipset")
 	iface := flag.String("i", "", "interface to add VIPs to")
+	sni := flag.Bool("S", false, "Enable SNI mode for probes")
 
 	flag.Parse()
 
@@ -128,8 +129,8 @@ func main() {
 	client, err := NewClient()
 
 	if err != nil {
-		logs.EMERG(F, "Couldn't start client:", err)
-		log.Fatal(err)
+		logs.EMERG(F, "Couldn't start client (check IPVS modules are loaded):", err)
+		log.Fatal("Couldn't start client (check IPVS modules are loaded):", err)
 	}
 
 	pool := bgp.NewPool(address.As4(), config.BGP, nil, logs.sub("bgp"))
@@ -147,6 +148,7 @@ func main() {
 
 	director := &cue.Director{
 		Notifier: balancer,
+		SNI:      *sni,
 	}
 
 	err = director.Start(config.parse())

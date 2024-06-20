@@ -4,7 +4,7 @@ go 1.20
 
 require (
 	github.com/cloudflare/ipvs v0.10.1
-	github.com/davidcoles/cue v0.0.13
+	github.com/davidcoles/cue v0.1.2
 	github.com/elastic/go-elasticsearch/v7 v7.17.10
 	github.com/lrh3321/ipset-go v0.0.0-20230425010353-0d9880b1ecac
 	github.com/vishvananda/netlink v1.2.1-beta.2
