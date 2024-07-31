@@ -78,7 +78,8 @@ func main() {
 		log.Fatal("Couldn't validate config file: ", err)
 	}
 
-	logs := &(config.Logging)
+	logs := &sink{}
+	logs.start(config.logging())
 
 	var link *netlink.Link
 	if *iface != "" {
@@ -147,6 +148,7 @@ func main() {
 	}
 
 	director := &cue.Director{
+		Address:  address,
 		Notifier: balancer,
 		SNI:      *sni,
 	}
@@ -228,7 +230,7 @@ func main() {
 			}
 
 			mutex.Lock()
-			vip = vipState(services, vip, logs)
+			vip = vipState(services, vip, config.priorities(), logs)
 			rib = adjRIBOut(vip, initialised)
 			mutex.Unlock()
 
@@ -267,7 +269,7 @@ func main() {
 	http.HandleFunc("/log/", func(w http.ResponseWriter, r *http.Request) {
 
 		start, _ := strconv.ParseUint(r.URL.Path[5:], 10, 64)
-		logs := logs.get(index(start))
+		logs := logs.get(start)
 		js, err := json.MarshalIndent(&logs, " ", " ")
 		if err != nil {
 			w.WriteHeader(http.StatusInternalServerError)
