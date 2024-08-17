@@ -1,16 +1,17 @@
-module vc5
+module stayinalived
 
 go 1.20
 
 require (
 	github.com/cloudflare/ipvs v0.10.1
-	github.com/davidcoles/cue v0.1.2
-	github.com/elastic/go-elasticsearch/v7 v7.17.10
+	github.com/davidcoles/cue v0.1.3
 	github.com/lrh3321/ipset-go v0.0.0-20230425010353-0d9880b1ecac
 	github.com/vishvananda/netlink v1.2.1-beta.2
+	vc5 v0.0.0
 )
 
 require (
+	github.com/elastic/go-elasticsearch/v7 v7.17.10 // indirect
 	github.com/google/go-cmp v0.5.9 // indirect
 	github.com/josharian/native v1.0.0 // indirect
 	github.com/mdlayher/genetlink v1.3.1 // indirect
@@ -35,3 +36,4 @@ require (
 )
 
 //replace github.com/davidcoles/cue => ../../cue
+replace vc5 => ../../stayinalived

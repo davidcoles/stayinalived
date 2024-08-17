@@ -1,7 +1,7 @@
 
 default: stayinalived config.json
 
-stayinalived: *.go static/*
+stayinalived: *.go
 	go build -o $@
 
 # avoid clobbering an existing config file when make is run with -B

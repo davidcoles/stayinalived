@@ -19,7 +19,6 @@
 package main
 
 import (
-	"embed"
 	"encoding/json"
 	"flag"
 	"fmt"
@@ -41,12 +40,9 @@ import (
 
 	lb "github.com/cloudflare/ipvs"
 	"github.com/vishvananda/netlink"
+
+	"vc5"
 )
-
-// TODO:
-
-//go:embed static/*
-var STATIC embed.FS
 
 func main() {
 
@@ -68,7 +64,7 @@ func main() {
 
 	file := args[0]
 
-	config, err := Load(file)
+	config, err := vc5.Load(file)
 
 	if err != nil {
 		log.Fatal("Couldn't load config file:", err)
@@ -78,8 +74,8 @@ func main() {
 		log.Fatal("Couldn't validate config file: ", err)
 	}
 
-	logs := &sink{}
-	logs.start(config.logging())
+	logs := &vc5.Sink{}
+	logs.Start(config.Logging_())
 
 	var link *netlink.Link
 	if *iface != "" {
@@ -124,7 +120,7 @@ func main() {
 		if err != nil {
 			log.Fatal("Couldn't listen on BGP port", err)
 		}
-		go bgpListener(l, logs.sub("bgp"))
+		go bgpListener(l, logs.Sub("bgp"))
 	}
 
 	client, err := NewClient()
@@ -134,7 +130,7 @@ func main() {
 		log.Fatal("Couldn't start client (check IPVS modules are loaded):", err)
 	}
 
-	pool := bgp.NewPool(address.As4(), config.BGP, nil, logs.sub("bgp"))
+	pool := bgp.NewPool(address.As4(), config.BGP, nil, logs.Sub("bgp"))
 
 	if pool == nil {
 		log.Fatal("BGP pool fail")
@@ -142,7 +138,7 @@ func main() {
 
 	balancer := &Balancer{
 		Client: client,
-		Logger: logs.sub("ipvs"),
+		Logger: logs.Sub("ipvs"),
 		Link:   link,
 		IPSet:  *ipset,
 	}
@@ -153,7 +149,7 @@ func main() {
 		SNI:      *sni,
 	}
 
-	err = director.Start(config.parse())
+	err = director.Start(config.Parse())
 
 	if err != nil {
 		logs.EMERG(F, "Couldn't start director:", err)
@@ -162,12 +158,12 @@ func main() {
 
 	done := make(chan bool)
 
-	vip := map[netip.Addr]State{}
+	vip := map[netip.Addr]vc5.State{}
 
 	var rib []netip.Addr
 	var summary Summary
 
-	services, old, _ := serviceStatus(config, balancer, director, nil)
+	services, old, _ := vc5.ServiceStatus(config, balancer, director, nil)
 
 	go func() {
 		ticker := time.NewTicker(time.Minute)
@@ -188,8 +184,8 @@ func main() {
 		for {
 			mutex.Lock()
 			//summary.update(client, uint64(time.Now().Sub(start)/time.Second))
-			summary.update(balancer.summary(), start)
-			services, old, summary.Current = serviceStatus(config, balancer, director, old)
+			summary.Update(balancer.summary(), start)
+			services, old, summary.Current = vc5.ServiceStatus(config, balancer, director, old)
 			mutex.Unlock()
 			select {
 			case <-ticker.C:
@@ -230,8 +226,8 @@ func main() {
 			}
 
 			mutex.Lock()
-			vip = vipState(services, vip, config.priorities(), logs)
-			rib = adjRIBOut(vip, initialised)
+			vip = vc5.VipState(services, vip, config.Priorities(), logs)
+			rib = vc5.AdjRIBOut(vip, initialised)
 			mutex.Unlock()
 
 			pool.RIB(rib)
@@ -240,7 +236,7 @@ func main() {
 
 	log.Println("Initialised")
 
-	static := http.FS(STATIC)
+	static := http.FS(vc5.STATIC)
 	var fs http.FileSystem
 
 	if *webroot != "" {
@@ -269,7 +265,7 @@ func main() {
 	http.HandleFunc("/log/", func(w http.ResponseWriter, r *http.Request) {
 
 		start, _ := strconv.ParseUint(r.URL.Path[5:], 10, 64)
-		logs := logs.get(start)
+		logs := logs.Get(start)
 		js, err := json.MarshalIndent(&logs, " ", " ")
 		if err != nil {
 			w.WriteHeader(http.StatusInternalServerError)
@@ -357,17 +353,17 @@ func main() {
 	http.HandleFunc("/status.json", func(w http.ResponseWriter, r *http.Request) {
 		mutex.Lock()
 		js, err := json.MarshalIndent(struct {
-			Summary  Summary               `json:"summary"`
-			Services map[VIP][]Serv        `json:"services"`
-			BGP      map[string]bgp.Status `json:"bgp"`
-			VIP      []VIPStats            `json:"vip"`
-			RIB      []netip.Addr          `json:"rib"`
-			Logging  LogStats              `json:"logging"`
+			Summary  Summary                `json:"summary"`
+			Services map[vc5.VIP][]vc5.Serv `json:"services"`
+			BGP      map[string]bgp.Status  `json:"bgp"`
+			VIP      []vc5.VIPStats         `json:"vip"`
+			RIB      []netip.Addr           `json:"rib"`
+			Logging  vc5.LogStats           `json:"logging"`
 		}{
 			Summary:  summary,
 			Services: services,
 			BGP:      pool.Status(),
-			VIP:      vipStatus(services, vip),
+			VIP:      vc5.VipStatus(services, vip),
 			RIB:      rib,
 			Logging:  logs.Stats(),
 		}, " ", " ")
@@ -386,7 +382,7 @@ func main() {
 	http.HandleFunc("/metrics", func(w http.ResponseWriter, r *http.Request) {
 
 		mutex.Lock()
-		metrics := prometheus("stayinalived", services, summary, vip)
+		metrics := vc5.Prometheus("stayinalived", services, summary, vip)
 		mutex.Unlock()
 
 		w.Header().Set("Content-Type", "text/plain")
@@ -408,7 +404,7 @@ func main() {
 		case syscall.SIGUSR2:
 			logs.NOTICE(F, "Reload signal received")
 
-			conf, err := Load(file)
+			conf, err := vc5.Load(file)
 
 			if err != nil {
 				logs.ALERT(F, "Couldn't load config file: ", file, err)
@@ -422,7 +418,7 @@ func main() {
 
 			mutex.Lock()
 			config = conf
-			director.Configure(config.parse())
+			director.Configure(config.Parse())
 			pool.Configure(config.BGP)
 			mutex.Unlock()
 
@@ -439,13 +435,35 @@ func main() {
 	}
 }
 
-func validate(config *Config) error {
+func validate(config *vc5.Config) error {
+
+	str := func(s vc5.Service) string {
+		return fmt.Sprintf("%s:%d:%s", s.Address, s.Port, s.Protocol)
+	}
 
 	for t, s := range config.Services {
 		if _, _, err := ipvsScheduler(s.Scheduler, s.Sticky); err != nil {
-			return fmt.Errorf("Service %s : %s", t.string(), err.Error())
+			return fmt.Errorf("Service %s : %s", str(t), err.Error())
 		}
 	}
 
 	return nil
+}
+
+func bgpListener(l net.Listener, logs vc5.Logger) {
+	F := "listener"
+
+	for {
+		conn, err := l.Accept()
+
+		if err != nil {
+			logs.ERR(F, "Failed to accept connection", err)
+		} else {
+			go func(c net.Conn) {
+				logs.INFO(F, "Accepted connection from", conn.RemoteAddr())
+				defer c.Close()
+				time.Sleep(time.Second * 10)
+			}(conn)
+		}
+	}
 }

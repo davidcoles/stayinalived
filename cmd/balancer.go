@@ -37,17 +37,37 @@ import (
 	"github.com/cloudflare/ipvs/netmask"
 	"github.com/lrh3321/ipset-go"
 	"github.com/vishvananda/netlink"
+
+	"vc5"
 )
 
 type Balancer struct {
 	Client ipvs.Client
-	Logger Logger
+	Logger *vc5.Sub
 	Link   *netlink.Link
 	IPSet  string
 
 	mutex sync.Mutex
 	state map[tuple]cue.Service
 }
+
+type Stats = vc5.Stats
+type tcpstats = vc5.TCPStats
+type KV = map[string]any
+type Summary = vc5.Summary
+type tuple struct {
+	Address  netip.Addr
+	Port     uint16
+	Protocol uint8
+}
+
+type ipport struct {
+	Address netip.Addr
+	Port    uint16
+}
+
+const TCP = vc5.TCP
+const UDP = vc5.UDP
 
 func (b *Balancer) Dest(s ipvs.Service, d ipvs.Destination) mon.Destination {
 	// differs from DSR - dest port might be be different to service port
@@ -394,7 +414,27 @@ func (b *Balancer) MAC(d ipvs.DestinationExtended) string {
 	return ""
 }
 
-func (b *Balancer) TCPStats() map[mon.Instance]tcpstats {
+func (b *Balancer) TCPStats() map[vc5.Instance]vc5.TCPStats {
+	tcp := map[vc5.Instance]vc5.TCPStats{}
+	/*
+	   svcs, _ := b.Client.Services()
+	   for _, se := range svcs {
+	       s := se.Service
+	       dsts, _ := b.Client.Destinations(s)
+	       for _, de := range dsts {
+	           d := de.Destination
+	           i := vc5.Instance{
+	               Service:     vc5.Service{Address: s.Address, Port: s.Port, Protocol: vc5.Protocol(s.Protocol)},
+	               Destination: vc5.Destination{Address: d.Address, Port: s.Port},
+	           }
+	           tcp[i] = vc5.TCPStats{ESTABLISHED: de.Stats.Current}
+	       }
+	   }
+	*/
+	return tcp
+}
+
+func (b *Balancer) _TCPStats() map[mon.Instance]tcpstats {
 
 	type l4 struct {
 		ip   netip.Addr
@@ -564,25 +604,56 @@ func (b *Balancer) Stats(s ipvs.Stats) (r Stats) {
 	return r
 }
 
-func (b *Balancer) Service(s cue.Service) (ipvs.ServiceExtended, error) {
+func _stats(s ipvs.Stats) (r vc5.Stats) {
+
+	r.IngressOctets = s.IncomingBytes
+	r.IngressPackets = s.IncomingPackets
+	r.EgressOctets = s.OutgoingBytes
+	r.EgressPackets = s.OutgoingPackets
+	r.Flows = s.Connections
+
+	return r
+}
+
+func updown(b bool) string {
+	if b {
+		return "up"
+	}
+	return "down"
+}
+
+func (b *Balancer) __Service(s cue.Service) (ipvs.ServiceExtended, error) {
 	xs := ipvs.Service{Address: s.Address, Port: s.Port, Protocol: ipvs.Protocol(s.Protocol), Family: ipvs.INET}
 	return b.Client.Service(xs)
 }
 
-func (b *Balancer) Destinations(s cue.Service) ([]ipvs.DestinationExtended, error) {
+func (b *Balancer) Destinations(s vc5.Service) (map[vc5.Destination]vc5.Stats, error) {
+	stats := map[vc5.Destination]vc5.Stats{}
+	//xs := xvs.Service{Address: s.Address, Port: s.Port, Protocol: uint8(s.Protocol)}
+	xs := ipvs.Service{Address: s.Address, Port: s.Port, Protocol: ipvs.Protocol(s.Protocol), Family: ipvs.INET}
+	ds, err := b.Client.Destinations(xs)
+	for _, d := range ds {
+		key := vc5.Destination{Address: d.Destination.Address, Port: s.Port}
+		stats[key] = _stats(d.Stats)
+	}
+
+	return stats, err
+}
+
+func (b *Balancer) _Destinations(s cue.Service) ([]ipvs.DestinationExtended, error) {
 	xs := ipvs.Service{Address: s.Address, Port: s.Port, Protocol: ipvs.Protocol(s.Protocol), Family: ipvs.INET}
 	return b.Client.Destinations(xs)
 }
 
-func (b *Balancer) Destination(dst cue.Destination) mon.Destination {
+func (b *Balancer) __Destination(dst cue.Destination) mon.Destination {
 	return mon.Destination{Address: dst.Address, Port: dst.Port}
 }
 
-func (b *Balancer) ServiceInstance(s cue.Service) mon.Instance {
+func (b *Balancer) __ServiceInstance(s cue.Service) mon.Instance {
 	return mon.Instance{Service: mon.Service{Address: s.Address, Port: s.Port, Protocol: s.Protocol}}
 }
 
-func (b *Balancer) DestinationInstance(s cue.Service, d cue.Destination) mon.Instance {
+func (b *Balancer) __DestinationInstance(s cue.Service, d cue.Destination) mon.Instance {
 	return mon.Instance{
 		Service:     mon.Service{Address: s.Address, Port: s.Port, Protocol: s.Protocol},
 		Destination: mon.Destination{Address: d.Address, Port: d.Port},
