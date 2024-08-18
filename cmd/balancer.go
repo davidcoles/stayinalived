@@ -410,31 +410,7 @@ func (l *LE) log() (string, KV)        { return l.f, l.k }
 func (l *LE) err(e error) (string, KV) { l.k["error"] = e.Error(); return l.log() }
 func (l *LE) add(k string, e any) *LE  { l.k[k] = e; return l }
 
-func (b *Balancer) MAC(d ipvs.DestinationExtended) string {
-	return ""
-}
-
 func (b *Balancer) TCPStats() map[vc5.Instance]vc5.TCPStats {
-	tcp := map[vc5.Instance]vc5.TCPStats{}
-	/*
-	   svcs, _ := b.Client.Services()
-	   for _, se := range svcs {
-	       s := se.Service
-	       dsts, _ := b.Client.Destinations(s)
-	       for _, de := range dsts {
-	           d := de.Destination
-	           i := vc5.Instance{
-	               Service:     vc5.Service{Address: s.Address, Port: s.Port, Protocol: vc5.Protocol(s.Protocol)},
-	               Destination: vc5.Destination{Address: d.Address, Port: s.Port},
-	           }
-	           tcp[i] = vc5.TCPStats{ESTABLISHED: de.Stats.Current}
-	       }
-	   }
-	*/
-	return tcp
-}
-
-func (b *Balancer) _TCPStats() map[mon.Instance]tcpstats {
 
 	type l4 struct {
 		ip   netip.Addr
@@ -448,7 +424,7 @@ func (b *Balancer) _TCPStats() map[mon.Instance]tcpstats {
 
 	re := regexp.MustCompile(`^(TCP)\s+([0-9A-F]+)\s+([0-9A-F]+)\s+([0-9A-F]+)\s+([0-9A-F]+)\s+([0-9A-F]+)\s+([0-9A-F]+)\s+(\S+)\s+(\d+)$`)
 
-	foo := map[mon.Instance]tcpstats{}
+	foo := map[vc5.Instance]vc5.TCPStats{}
 
 	file, err := os.OpenFile("/proc/net/ip_vs_conn", os.O_RDONLY, os.ModePerm)
 	if err != nil {
@@ -481,13 +457,13 @@ func (b *Balancer) _TCPStats() map[mon.Instance]tcpstats {
 			continue
 		}
 
-		instance := mon.Instance{
-			Service: mon.Service{
+		instance := vc5.Instance{
+			Service: vc5.Service{
 				Address:  untoIP,
 				Port:     untoPort,
 				Protocol: TCP,
 			},
-			Destination: mon.Destination{
+			Destination: vc5.Destination{
 				Address: destIP,
 				Port:    destPort,
 			},
@@ -622,11 +598,6 @@ func updown(b bool) string {
 	return "down"
 }
 
-func (b *Balancer) __Service(s cue.Service) (ipvs.ServiceExtended, error) {
-	xs := ipvs.Service{Address: s.Address, Port: s.Port, Protocol: ipvs.Protocol(s.Protocol), Family: ipvs.INET}
-	return b.Client.Service(xs)
-}
-
 func (b *Balancer) Destinations(s vc5.Service) (map[vc5.Destination]vc5.Stats, error) {
 	stats := map[vc5.Destination]vc5.Stats{}
 	//xs := xvs.Service{Address: s.Address, Port: s.Port, Protocol: uint8(s.Protocol)}
@@ -638,26 +609,6 @@ func (b *Balancer) Destinations(s vc5.Service) (map[vc5.Destination]vc5.Stats, e
 	}
 
 	return stats, err
-}
-
-func (b *Balancer) _Destinations(s cue.Service) ([]ipvs.DestinationExtended, error) {
-	xs := ipvs.Service{Address: s.Address, Port: s.Port, Protocol: ipvs.Protocol(s.Protocol), Family: ipvs.INET}
-	return b.Client.Destinations(xs)
-}
-
-func (b *Balancer) __Destination(dst cue.Destination) mon.Destination {
-	return mon.Destination{Address: dst.Address, Port: dst.Port}
-}
-
-func (b *Balancer) __ServiceInstance(s cue.Service) mon.Instance {
-	return mon.Instance{Service: mon.Service{Address: s.Address, Port: s.Port, Protocol: s.Protocol}}
-}
-
-func (b *Balancer) __DestinationInstance(s cue.Service, d cue.Destination) mon.Instance {
-	return mon.Instance{
-		Service:     mon.Service{Address: s.Address, Port: s.Port, Protocol: s.Protocol},
-		Destination: mon.Destination{Address: d.Address, Port: d.Port},
-	}
 }
 
 // interface method called by mon when a destination's heatlh status transitions up or down
