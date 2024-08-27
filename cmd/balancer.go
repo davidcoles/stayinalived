@@ -20,7 +20,6 @@ package main
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"net"
 	"net/netip"
@@ -31,9 +30,6 @@ import (
 	"os"
 	"regexp"
 	"strconv"
-
-	"github.com/davidcoles/cue"
-	//"github.com/davidcoles/cue/mon"
 
 	"github.com/cloudflare/ipvs"
 	"github.com/cloudflare/ipvs/netmask"
@@ -143,7 +139,6 @@ func (b *Balancer) _maintain(fin bool) {
 
 }
 
-//func ipsetEntry(t tuple) *ipset.Entry {
 func ipsetEntry(t vc5.Service) *ipset.Entry {
 
 	var ip net.IP
@@ -198,7 +193,6 @@ func (b *Balancer) Configure(services []vc5.Manifest) error {
 			continue
 		}
 
-		//key := tuple{Address: s.Service.Address, Port: s.Service.Port, Protocol: uint8(s.Service.Protocol)}
 		key := from_ipvs(s.Service)
 
 		if t, wanted := todo[key]; !wanted {
@@ -253,7 +247,7 @@ func (b *Balancer) Configure(services []vc5.Manifest) error {
 		}
 	}
 
-	//b._maintain() // make sure IP is on link device and ipset is populated
+	// make sure IPs are on link device and ipset is populated
 	select {
 	case b.maintain <- true:
 	default:
@@ -262,10 +256,10 @@ func (b *Balancer) Configure(services []vc5.Manifest) error {
 	return nil
 }
 
-func (b *Balancer) destinations(s ipvs.Service, drain bool, destinations []cue.Destination) error {
+func (b *Balancer) destinations(s ipvs.Service, drain bool, destinations []vc5.Backend) error {
 
 	//dest := vc5.Destination{Address: d.Address, Port: d.Port}
-	target := map[vc5.Destination]cue.Destination{}
+	target := map[vc5.Destination]vc5.Backend{}
 
 	for _, d := range destinations {
 		if drain || d.HealthyWeight() > 0 {
@@ -350,7 +344,7 @@ func ipvsService(s vc5.Manifest) ipvs.Service {
 	}
 }
 
-func ipvsDestination(d cue.Destination) ipvs.Destination {
+func ipvsDestination(d vc5.Backend) ipvs.Destination {
 
 	family := ipvs.INET
 
@@ -371,61 +365,6 @@ func ipvsDestination(d cue.Destination) ipvs.Destination {
 		//TunnelFlags: TunnelFlags,
 	}
 }
-
-/**********************************************************************/
-// Logging
-/**********************************************************************/
-
-type dest = ipvs.Destination
-type serv = ipvs.Service
-
-func logServEvent(e string, s serv, p ...ipvs.Service) *LE {
-	kv := KV{"service": svc(s)}
-	if len(p) > 0 {
-		//kv.add("previous", svc(p[0]))
-		kv["previous"] = svc(p[0])
-	}
-	return &LE{f: "service." + e, k: kv}
-}
-
-func logServQuery(s serv) *LE     { return logServEvent("query", s) }
-func logServCreate(s serv) *LE    { return logServEvent("create", s) }
-func logServRemove(s serv) *LE    { return logServEvent("remove", s) }
-func logServUpdate(s, p serv) *LE { return logServEvent("update", s, p) }
-
-func logDestEvent(e string, s ipvs.Service, d ipvs.Destination, p ...ipvs.Destination) *LE {
-	kv := KV{"service": svc(s), "destination": dst(d)}
-	if len(p) > 1 {
-		//kv.add("previous", dst(p[0]))
-		kv["previous"] = dst(p[0])
-	}
-	return &LE{f: "destination." + e, k: kv}
-}
-
-func logDestCreate(s serv, d dest) *LE    { return logDestEvent("create", s, d) }
-func logDestRemove(s serv, d dest) *LE    { return logDestEvent("remove", s, d) }
-func logDestUpdate(s serv, d, p dest) *LE { return logDestEvent("update", s, d, p) }
-
-func svc(s ipvs.Service) string {
-	js, _ := json.Marshal(s)
-	return string(js)
-	return fmt.Sprint(s)
-}
-
-func dst(d ipvs.Destination) string {
-	js, _ := json.Marshal(d)
-	return string(js)
-	return fmt.Sprint(d)
-}
-
-type LE struct {
-	k KV
-	f string
-}
-
-func (l *LE) log() (string, KV)        { return l.f, l.k }
-func (l *LE) err(e error) (string, KV) { l.k["error"] = e.Error(); return l.log() }
-func (l *LE) add(k string, e any) *LE  { l.k[k] = e; return l }
 
 type TCPStats struct {
 	SYN_RECV    uint64
@@ -448,11 +387,11 @@ func (b *Balancer) TCPStats() map[vc5.Instance]TCPStats {
 
 	re := regexp.MustCompile(`^(TCP)\s+([0-9A-F]+)\s+([0-9A-F]+)\s+([0-9A-F]+)\s+([0-9A-F]+)\s+([0-9A-F]+)\s+([0-9A-F]+)\s+(\S+)\s+(\d+)$`)
 
-	foo := map[vc5.Instance]TCPStats{}
+	stats := map[vc5.Instance]TCPStats{}
 
 	file, err := os.OpenFile("/proc/net/ip_vs_conn", os.O_RDONLY, os.ModePerm)
 	if err != nil {
-		return foo
+		return stats
 	}
 	defer file.Close()
 
@@ -496,7 +435,7 @@ func (b *Balancer) TCPStats() map[vc5.Instance]TCPStats {
 		state := m[8]
 		//count, _ := strconv.ParseInt(m[9], 10, 64)
 
-		v := foo[instance]
+		v := stats[instance]
 
 		switch state {
 		case "SYN_RECV":
@@ -509,15 +448,10 @@ func (b *Balancer) TCPStats() map[vc5.Instance]TCPStats {
 			v.TIME_WAIT++
 		}
 
-		foo[instance] = v
+		stats[instance] = v
 
 	}
-
-	//for k, v := range foo {
-	//	fmt.Printf("%s:%d -> %s:%d %v\n", k.Service.Address, k.Service.Port, k.Destination.Address, k.Destination.Port, v)
-	//}
-
-	return foo
+	return stats
 }
 
 func ip4(s string) (r netip.Addr, b bool) {

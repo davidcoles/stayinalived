@@ -264,6 +264,8 @@ type Manifest cue.Service             // so we don't have to explicitly pull cue
 func (s Manifest) Service() Service   { return s.Instance().Service }
 func (s Manifest) Instance() Instance { return instance(cue.Service(s), cue.Destination{}) }
 
+type Backend = cue.Destination
+
 type Balancer interface {
 	Stats() map[Instance]Stats
 	Summary() Summary
