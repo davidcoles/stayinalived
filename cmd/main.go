@@ -37,11 +37,8 @@ import (
 // * merge manager changes back to vc5 repo
 
 func main() {
-	main_()
-	time.Sleep(5 * time.Second)
-}
 
-func main_() {
+	defer time.Sleep(5 * time.Second)
 
 	F := "vc5"
 
