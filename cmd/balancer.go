@@ -20,8 +20,10 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"net"
+	"net/http"
 	"net/netip"
 	"sync"
 	"time"
@@ -42,9 +44,10 @@ import (
 type Balancer struct {
 	Client ipvs.Client
 	Logger vc5.Logger
-	Link   *netlink.Link
+	Link   string
 	IPSet  string
 
+	link     *netlink.Link
 	mutex    sync.Mutex
 	state    map[vc5.Service]vc5.Manifest
 	maintain chan bool
@@ -71,7 +74,16 @@ func netlinkAddr(a netip.Addr) *netlink.Addr {
 //func (b *Balancer) INFO(s string, a ...any) { b.Logger.INFO(s, a...) }
 //func (b *Balancer) ERR(s string, a ...any)  { b.Logger.ERR(s, a...) }
 
-func (b *Balancer) start(ctx context.Context) {
+func (b *Balancer) start(ctx context.Context) error {
+
+	if b.Link != "" {
+		l, err := netlink.LinkByName(b.Link)
+		if err != nil {
+			return err
+		}
+		b.link = &l
+	}
+
 	b.maintain = make(chan bool, 1)
 
 	go func() {
@@ -90,6 +102,8 @@ func (b *Balancer) start(ctx context.Context) {
 			b._maintain(false)
 		}
 	}()
+
+	return nil
 }
 
 func _vips(state map[vc5.Service]vc5.Manifest) map[netip.Addr]bool {
@@ -117,8 +131,8 @@ func (b *Balancer) _maintain(fin bool) {
 		}
 
 		for v, _ := range _vips(b.state) {
-			if addr := netlinkAddr(v); b.Link != nil && addr != nil {
-				netlink.AddrDel(*b.Link, netlinkAddr(v))
+			if addr := netlinkAddr(v); b.link != nil && addr != nil {
+				netlink.AddrDel(*b.link, netlinkAddr(v))
 			}
 		}
 
@@ -132,8 +146,8 @@ func (b *Balancer) _maintain(fin bool) {
 	}
 
 	for v, _ := range _vips(b.state) {
-		if addr := netlinkAddr(v); b.Link != nil && addr != nil {
-			netlink.AddrAdd(*b.Link, netlinkAddr(v))
+		if addr := netlinkAddr(v); b.link != nil && addr != nil {
+			netlink.AddrAdd(*b.link, netlinkAddr(v))
 		}
 	}
 
@@ -242,8 +256,8 @@ func (b *Balancer) Configure(services []vc5.Manifest) error {
 
 	// remove any addresses which are no longer active
 	for v, _ := range vipsToRemove {
-		if addr := netlinkAddr(v); b.Link != nil && addr != nil {
-			netlink.AddrDel(*b.Link, netlinkAddr(v))
+		if addr := netlinkAddr(v); b.link != nil && addr != nil {
+			netlink.AddrDel(*b.link, netlinkAddr(v))
 		}
 	}
 
@@ -579,4 +593,55 @@ func (b *Balancer) Summary() (r vc5.Summary) {
 	}
 
 	return
+}
+
+func validate(config *vc5.Config) error {
+
+	str := func(s vc5.Service) string {
+		return fmt.Sprintf("%s:%d:%s", s.Address, s.Port, s.Protocol)
+	}
+
+	for t, s := range config.Services {
+		if _, _, err := ipvsScheduler(s.Scheduler, s.Sticky); err != nil {
+			return fmt.Errorf("Service %s : %s", str(t), err.Error())
+		}
+	}
+
+	return nil
+}
+
+func httpEndpoints(client Client) {
+
+	// Remove this if migrating to a different load balancing engine
+	http.HandleFunc("/lb.json", func(w http.ResponseWriter, r *http.Request) {
+		var ret []interface{}
+		type status struct {
+			Service      ipvs.ServiceExtended
+			Destinations []ipvs.DestinationExtended
+		}
+		info, _ := client.Info()
+		svcs, _ := client.Services()
+		for _, se := range svcs {
+			dsts, _ := client.Destinations(se.Service)
+			ret = append(ret, status{Service: se, Destinations: dsts})
+		}
+
+		js, err := json.MarshalIndent(struct {
+			Info     any
+			Services []any
+		}{
+			Info:     info,
+			Services: ret,
+		}, "", " ")
+
+		if err != nil {
+			w.WriteHeader(http.StatusInternalServerError)
+			return
+		}
+
+		js = append(js, 0x0a)
+		w.Header().Set("Content-Type", "application/json")
+		w.Write(js)
+	})
+
 }

@@ -20,20 +20,14 @@ package main
 
 import (
 	"context"
-	"encoding/json"
 	"flag"
-	"fmt"
 	"log"
 	"net"
-	"net/http"
 	"net/netip"
 	"os"
 	"os/signal"
 	"syscall"
 	"time"
-
-	lb "github.com/cloudflare/ipvs"
-	"github.com/vishvananda/netlink"
 
 	"vc5"
 )
@@ -41,7 +35,6 @@ import (
 // TODO:
 // * put logging back in
 // * merge manager changes back to vc5 repo
-// * validate config
 
 func main() {
 
@@ -71,17 +64,6 @@ func main() {
 	}
 
 	logs := vc5.NewLogger(config.HostID, config.LoggingConfig())
-
-	var link *netlink.Link
-	if *iface != "" {
-		l, err := netlink.LinkByName(*iface)
-		if err != nil {
-			//logs.EMERG(F, "Couldn't open netlink:", err)
-			//log.Fatal(err)
-			logs.Fatal(F, "netlink", KV{"error.message": err.Error()})
-		}
-		link = &l
-	}
 
 	if config.Address != "" {
 		*addr = config.Address
@@ -134,11 +116,15 @@ func main() {
 	balancer := &Balancer{
 		Client: client,
 		Logger: logs.Sub("balancer"),
-		Link:   link,
+		Link:   *iface,
 		IPSet:  *ipset,
 	}
 
-	balancer.start(ctx) // needed to maintain ipsets/loopback addrs
+	err = balancer.start(ctx) // needed to maintain ipsets/loopback addrs
+
+	if err != nil {
+		logs.Fatal(F, "balancer", KV{"error.message": err.Error()})
+	}
 
 	// The manager handles the main event loop, healthchecks, requests
 	// for the console/metrics, sets up BGP sessions, etc.
@@ -172,13 +158,18 @@ func main() {
 			fallthrough
 		case syscall.SIGUSR2:
 			logs.Alert(vc5.NOTICE, F, "reload", KV{}, "Reload signal received")
-			conf, err := vc5.Load(file) // FIXME - validate!
+			conf, err := vc5.Load(file)
+
+			if err == nil {
+				err = validate(conf)
+			}
+
 			if err == nil {
 				config = conf
 				config.Address = *addr
 				config.Webserver = *webserver
 				config.Webroot = *webroot
-				manager.Configure(conf)
+				manager.Configure(config)
 			} else {
 				text := "Couldn't load config file " + file + " :" + err.Error()
 				logs.Alert(vc5.ALERT, F, "config", KV{"file.path": file, "error.message": err.Error()}, text)
@@ -194,21 +185,6 @@ func main() {
 		}
 	}
 
-}
-
-func validate(config *vc5.Config) error {
-
-	str := func(s vc5.Service) string {
-		return fmt.Sprintf("%s:%d:%s", s.Address, s.Port, s.Protocol)
-	}
-
-	for t, s := range config.Services {
-		if _, _, err := ipvsScheduler(s.Scheduler, s.Sticky); err != nil {
-			return fmt.Errorf("Service %s : %s", str(t), err.Error())
-		}
-	}
-
-	return nil
 }
 
 func bgpListener(l net.Listener, logs vc5.Logger) {
@@ -227,39 +203,4 @@ func bgpListener(l net.Listener, logs vc5.Logger) {
 			}(conn)
 		}
 	}
-}
-func httpEndpoints(client Client) {
-
-	// Remove this if migrating to a different load balancing engine
-	http.HandleFunc("/lb.json", func(w http.ResponseWriter, r *http.Request) {
-		var ret []interface{}
-		type status struct {
-			Service      lb.ServiceExtended
-			Destinations []lb.DestinationExtended
-		}
-		info, _ := client.Info()
-		svcs, _ := client.Services()
-		for _, se := range svcs {
-			dsts, _ := client.Destinations(se.Service)
-			ret = append(ret, status{Service: se, Destinations: dsts})
-		}
-
-		js, err := json.MarshalIndent(struct {
-			Info     any
-			Services []any
-		}{
-			Info:     info,
-			Services: ret,
-		}, "", " ")
-
-		if err != nil {
-			w.WriteHeader(http.StatusInternalServerError)
-			return
-		}
-
-		js = append(js, 0x0a)
-		w.Header().Set("Content-Type", "application/json")
-		w.Write(js)
-	})
-
 }
