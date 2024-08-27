@@ -37,6 +37,11 @@ import (
 // * merge manager changes back to vc5 repo
 
 func main() {
+	main_()
+	time.Sleep(5 * time.Second)
+}
+
+func main_() {
 
 	F := "vc5"
 
@@ -110,9 +115,17 @@ func main() {
 		log.Fatal("Couldn't start client (check IPVS modules are loaded):", err)
 	}
 
+	// Add some custom HTTP endpoints to the default mux to handle
+	// requests specific to this type of load balancer client
+	httpEndpoints(client)
+
 	// context to use for shutting down services when we're about to exit
 	ctx, shutdown := context.WithCancel(context.Background())
+	defer shutdown()
 
+	// Create a balancer instance - this implements interface methods
+	// (configuration changes, stats requests, etc). which are called
+	// by the manager object (which handles the main event loop)
 	balancer := &Balancer{
 		Client: client,
 		Logger: logs.Sub("balancer"),
@@ -120,9 +133,8 @@ func main() {
 		IPSet:  *ipset,
 	}
 
-	err = balancer.start(ctx) // needed to maintain ipsets/loopback addrs
-
-	if err != nil {
+	// Run server to maintain ipsets and vips on dummy interface
+	if err = balancer.start(ctx); err != nil {
 		logs.Fatal(F, "balancer", KV{"error.message": err.Error()})
 	}
 
@@ -132,11 +144,11 @@ func main() {
 		Config:   config,
 		Balancer: balancer,
 		Logs:     logs,
+		WebRoot:  *webroot,     // Serve static files from this directory
 		RouterID: routerID,     // BGP router ID to use to speak to peers
 		LocalBGP: uint16(*asn), // If non-zero then loopback BGP is activated
-		WebRoot:  *webroot,
-		Address:  address,
-		SNI:      *sni,
+		Address:  address,      // Required for SYN probes
+		SNI:      *sni,         // Needs to be true for servers tha are picky about SNI names
 	}
 
 	if err := manager.Manage(ctx, listener); err != nil {
@@ -178,9 +190,7 @@ func main() {
 		case syscall.SIGTERM:
 			fallthrough
 		case syscall.SIGQUIT:
-			shutdown() // cancel context to shut down BGP, etc
 			logs.Alert(vc5.ALERT, F, "exiting", KV{}, "Exiting")
-			time.Sleep(4 * time.Second)
 			return
 		}
 	}
