@@ -38,6 +38,11 @@ import (
 	"vc5"
 )
 
+// TODO:
+// * put logging back in
+// * merge manager changes back to vc5 repo
+// * validate config
+
 func main() {
 
 	F := "vc5"
@@ -97,6 +102,8 @@ func main() {
 		log.Fatal("Address is not IPv4: ", address)
 	}
 
+	routerID := address.As4()
+
 	var listener net.Listener
 
 	if *webserver != "" {
@@ -121,7 +128,8 @@ func main() {
 		log.Fatal("Couldn't start client (check IPVS modules are loaded):", err)
 	}
 
-	routerID := address.As4()
+	// context to use for shutting down services when we're about to exit
+	ctx, shutdown := context.WithCancel(context.Background())
 
 	balancer := &Balancer{
 		Client: client,
@@ -130,8 +138,7 @@ func main() {
 		IPSet:  *ipset,
 	}
 
-	// context to use for shutting down services when we're about to exit
-	ctx, shutdown := context.WithCancel(context.Background())
+	balancer.start(ctx) // needed to maintain ipsets/loopback addrs
 
 	// The manager handles the main event loop, healthchecks, requests
 	// for the console/metrics, sets up BGP sessions, etc.
