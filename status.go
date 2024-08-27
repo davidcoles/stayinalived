@@ -19,6 +19,7 @@
 package vc5
 
 import (
+	"fmt"
 	"net/netip"
 	"sort"
 	"time"
@@ -26,7 +27,9 @@ import (
 	"github.com/davidcoles/cue"
 )
 
-type Serv struct {
+type servicemap map[netip.Addr][]serv
+
+type serv struct {
 	Name         string     `json:"name,omitempty"`
 	Description  string     `json:"description"`
 	Address      netip.Addr `json:"address"`
@@ -35,7 +38,7 @@ type Serv struct {
 	Required     uint8      `json:"required"`
 	Available    uint8      `json:"available"`
 	Stats        Stats      `json:"stats"`
-	Destinations []Dest     `json:"destinations,omitempty"`
+	Destinations []dest     `json:"destinations,omitempty"`
 	Up           bool       `json:"up"`
 	For          uint64     `json:"for"`
 	Last         uint64     `json:"last"`
@@ -43,7 +46,7 @@ type Serv struct {
 	Scheduler    string     `json:"scheduler"`
 }
 
-type Dest struct {
+type dest struct {
 	Address    netip.Addr `json:"address"`
 	Port       uint16     `json:"port"`
 	Stats      Stats      `json:"stats"`
@@ -58,13 +61,13 @@ type Dest struct {
 	MAC        string     `json:"mac"`
 }
 
-type State struct {
+type state struct {
 	up   bool
 	time time.Time
 }
 
-func (s *State) Up() bool        { return s.up }
-func (s *State) Time() time.Time { return s.time }
+func (s *state) Up() bool        { return s.up }
+func (s *state) Time() time.Time { return s.time }
 
 type Stats struct {
 	IngressOctets  uint64 `json:"ingress_octets"`
@@ -126,15 +129,14 @@ func (s *Stats) add(x Stats) {
 
 }
 
-type VIP = netip.Addr
-type VIPStats struct {
-	VIP   VIP    `json:"vip"`
-	Up    bool   `json:"up"`
-	Stats Stats  `json:"stats"`
-	For   uint64 `json:"for"`
+type vipstats struct {
+	VIP   netip.Addr `json:"vip"`
+	Up    bool       `json:"up"`
+	Stats Stats      `json:"stats"`
+	For   uint64     `json:"for"`
 }
 
-func VipStatus(in map[VIP][]Serv, foo map[netip.Addr]State) (out []VIPStats) {
+func vipStatus(in servicemap, state map[netip.Addr]state) (out []vipstats) {
 
 	for vip, list := range in {
 		var stats Stats
@@ -142,12 +144,12 @@ func VipStatus(in map[VIP][]Serv, foo map[netip.Addr]State) (out []VIPStats) {
 			stats.add(s.Stats)
 		}
 
-		r, ok := foo[vip]
+		r, ok := state[vip]
 		if !ok {
 			r.time = time.Now()
 		}
 
-		out = append(out, VIPStats{VIP: vip, Stats: stats, Up: r.up, For: uint64(time.Now().Sub(r.time) / time.Second)})
+		out = append(out, vipstats{VIP: vip, Stats: stats, Up: r.up, For: uint64(time.Now().Sub(r.time) / time.Second)})
 	}
 
 	sort.SliceStable(out, func(i, j int) bool {
@@ -157,64 +159,75 @@ func VipStatus(in map[VIP][]Serv, foo map[netip.Addr]State) (out []VIPStats) {
 	return
 }
 
-func VipState(services []cue.Service, old map[netip.Addr]State, priorities map[netip.Addr]priority, logs Logger) map[netip.Addr]State {
-	facility := "vips"
+func vipState(services []cue.Service, old map[netip.Addr]state, priorities map[netip.Addr]priority, logs Logger, mature bool) map[netip.Addr]state {
+	F := "vip"
 
 	rib := map[netip.Addr]bool{}
-	new := map[netip.Addr]State{}
+	new := map[netip.Addr]state{}
 
 	for _, v := range cue.HealthyVIPs(services) {
 		rib[v] = true
 	}
 
 	for _, v := range cue.AllVIPs(services) {
-		p, _ := priorities[v]
-		log := logs.ERR
 
-		switch p {
-		case CRITICAL:
-			log = logs.ERR
-		case HIGH:
-			log = logs.WARNING
-		case MEDIUM:
-			log = logs.NOTICE
-		case LOW:
-			log = logs.INFO
-		}
-
-		updown := func(b bool) string {
-			if b {
-				return "up"
-			}
-			return "down"
-		}
+		up, _ := rib[v]
+		severity := priorityToSeverity(priorities[v])
 
 		if o, ok := old[v]; ok {
-			up, _ := rib[v]
 
 			if o.up != up {
-				new[v] = State{up: up, time: time.Now()}
-				log(facility, KV{"vip": v, "state": updown(up), "event": "vip"})
+				new[v] = state{up: up, time: time.Now()}
+				text := fmt.Sprintf("VIP %s went %s", v, upDown(up))
+				if mature {
+					logs.Alert(severity, F, "state", KV{"service.ip": v, "service.state": upDown(up)}, text)
+				}
 			} else {
 				new[v] = o
 			}
 
 		} else {
-			log(facility, KV{"vip": v, "state": updown(rib[v]), "event": "vip"})
-			new[v] = State{up: rib[v], time: time.Now()}
+			new[v] = state{up: rib[v], time: time.Now()}
+			if mature {
+				logs.Event(DEBUG, F, "added", KV{"service.ip": v, "service.state": upDown(up)})
+			}
+		}
+
+		if mature {
+			logs.State(F, "state", KV{"service.ip": v, "service.state": upDown(up)})
+		}
+	}
+
+	for vip, _ := range old {
+		if _, exists := new[vip]; !exists {
+			if mature {
+				logs.Event(DEBUG, F, "removed", KV{"service.ip": vip})
+			}
 		}
 	}
 
 	return new
 }
 
-func AdjRIBOut(vip map[netip.Addr]State, initialised bool) (r []netip.Addr) {
-	for v, s := range vip {
-		if initialised && s.up && time.Now().Sub(s.time) > time.Second*5 {
-			r = append(r, v)
-		}
+func upDown(b bool) string {
+	if b {
+		return "up"
 	}
-	return
+	return "down"
+}
+
+func priorityToSeverity(p priority) uint8 {
+	switch p {
+	case CRITICAL:
+		return ERR
+	case HIGH:
+		return WARNING
+	case MEDIUM:
+		return NOTICE
+	case LOW:
+		return INFO
+	}
+	return ERR
 }
 
 func (s *Summary) Update(n Summary, start time.Time) {
@@ -242,25 +255,19 @@ func (s *Summary) Update(n Summary, start time.Time) {
 	}
 }
 
-type Service struct {
-	Address  netip.Addr
-	Port     uint16
-	Protocol Protocol
-}
-
-type Destination struct {
-	Address netip.Addr
-	Port    uint16
-}
-
 type Instance struct {
 	Service     Service
 	Destination Destination
 }
 
+type Manifest cue.Service             // so we don't have to explicitly pull cue into the balancer - not keen on the name though
+func (s Manifest) Service() Service   { return s.Instance().Service }
+func (s Manifest) Instance() Instance { return instance(cue.Service(s), cue.Destination{}) }
+
 type Balancer interface {
-	TCPStats() map[Instance]TCPStats
-	Destinations(s Service) (map[Destination]Stats, error)
+	Stats() map[Instance]Stats
+	Summary() Summary
+	Configure([]Manifest) error
 }
 
 func calculateRate(s Stats, o Stats) Stats {
@@ -282,33 +289,32 @@ func calculateRate(s Stats, o Stats) Stats {
 	return s
 }
 
-type TCPStats struct {
-	SYN_RECV    uint64
-	ESTABLISHED uint64
-	CLOSE       uint64
-	TIME_WAIT   uint64
-}
-
-func ServiceStatus(config *Config, balancer Balancer, director *cue.Director, old map[Instance]Stats) (map[netip.Addr][]Serv, map[Instance]Stats, uint64) {
+func serviceStatus(config *Config, balancer Balancer, director *cue.Director, old map[Instance]Stats) (servicemap, map[Instance]Stats, uint64) {
 
 	var current uint64
 
 	stats := map[Instance]Stats{}
-	status := map[netip.Addr][]Serv{}
-	tcpstats := balancer.TCPStats()
+	status := map[netip.Addr][]serv{}
+	allstats := balancer.Stats()
 
 	for _, svc := range director.Status() {
+		cnf, _ := config.Services[Manifest(svc).Service()]
+		//key := serviceInstance(svc)
+		key := Manifest(svc).Instance()
+		lbs := map[Destination]Stats{}
 
-		cnf, _ := config.Services[service(svc)]
-		key := serviceInstance(svc)
-		lbs, _ := balancer.Destinations(service(svc))
+		for k, v := range allstats {
+			if k.Service == key.Service {
+				lbs[k.Destination] = v
+			}
+		}
 
 		var sum Stats
 		for _, s := range lbs {
 			sum.add(s)
 		}
 
-		serv := Serv{
+		serv := serv{
 			Name:        cnf.Name,
 			Description: cnf.Description,
 			Address:     svc.Address,
@@ -324,8 +330,10 @@ func ServiceStatus(config *Config, balancer Balancer, director *cue.Director, ol
 		}
 
 		for _, dst := range svc.Destinations {
-			key := destinationInstance(svc, dst)
-			dest := Dest{
+			foo := lbs[destination(dst)]
+
+			key := instance(svc, dst)
+			dest := dest{
 				Address:    dst.Address,
 				Port:       dst.Port,
 				Disabled:   dst.Disabled,
@@ -338,12 +346,7 @@ func ServiceStatus(config *Config, balancer Balancer, director *cue.Director, ol
 				MAC:        lbs[destination(dst)].MAC,
 			}
 
-			if tcp, ok := tcpstats[destinationInstance(svc, dst)]; ok {
-				dest.Stats.Current = tcp.ESTABLISHED
-				serv.Stats.Current += tcp.ESTABLISHED
-				current += tcp.ESTABLISHED
-			}
-
+			current += foo.Current
 			stats[key] = dest.Stats
 			serv.Destinations = append(serv.Destinations, dest)
 		}
@@ -360,20 +363,16 @@ func ServiceStatus(config *Config, balancer Balancer, director *cue.Director, ol
 	return status, stats, current
 }
 
-func service(s cue.Service) Service {
-	return Service{Address: s.Address, Port: s.Port, Protocol: Protocol(s.Protocol)}
+func destination(d cue.Destination) Destination { return Destination{Address: d.Address, Port: d.Port} }
+func instance(s cue.Service, d cue.Destination) (i Instance) {
+	i.Service = Service{Address: s.Address, Port: s.Port, Protocol: Protocol(s.Protocol)}
+	i.Destination = Destination{Address: d.Address, Port: d.Port}
+	return
 }
 
-func destination(dst cue.Destination) Destination {
-	return Destination{Address: dst.Address, Port: dst.Port}
-}
-
-func destinationInstance(s cue.Service, d cue.Destination) Instance {
-	return Instance{
-		Service:     Service{Address: s.Address, Port: s.Port, Protocol: Protocol(s.Protocol)},
-		Destination: Destination{Address: d.Address, Port: d.Port},
-	}
-}
-func serviceInstance(s cue.Service) Instance {
-	return Instance{Service: Service{Address: s.Address, Port: s.Port, Protocol: Protocol(s.Protocol)}}
-}
+//func manifests(c []cue.Service) (m []Manifest) {
+//	for _, s := range x {
+//		m = append(m, s)
+//	}
+//	return
+//}

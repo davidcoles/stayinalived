@@ -3,9 +3,6 @@ package vc5
 import (
 	"bytes"
 	"context"
-	"fmt"
-	"sync"
-	"sync/atomic"
 
 	"github.com/elastic/go-elasticsearch/v7"
 	"github.com/elastic/go-elasticsearch/v7/esapi"
@@ -20,11 +17,7 @@ type Elasticsearch struct {
 	Username  secret   `json:"username,omitempty"`
 	Password  secret   `json:"password,omitempty"`
 
-	c       chan string
-	mutex   sync.Mutex
-	started bool
-	client  *elasticsearch.Client
-	fail    atomic.Uint64
+	client *elasticsearch.Client
 }
 
 func (e *Elasticsearch) start() (err error) {
@@ -49,10 +42,10 @@ func (e *Elasticsearch) log(host string, id uint64, body []byte) bool {
 
 	ctx := context.Background()
 	req := esapi.IndexRequest{
-		Index:      e.Index,
-		DocumentID: fmt.Sprintf("%s-%d", host, id),
-		Body:       bytes.NewReader(body),
-		Refresh:    "true",
+		Index: e.Index,
+		//DocumentID: fmt.Sprintf("%s-%d", host, id), // don't think that this was ever really needed ...
+		Body:    bytes.NewReader(body),
+		Refresh: "true",
 	}
 
 	res, err := req.Do(ctx, e.client)
@@ -62,6 +55,10 @@ func (e *Elasticsearch) log(host string, id uint64, body []byte) bool {
 	}
 
 	defer res.Body.Close()
+
+	//if res.StatusCode != 201 {
+	//	log.Println(err, res.StatusCode, string(body))
+	//}
 
 	return res.StatusCode == 201
 }

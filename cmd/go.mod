@@ -35,5 +35,4 @@ require (
 	modernc.org/token v1.0.1 // indirect
 )
 
-//replace github.com/davidcoles/cue => ../../cue
 replace vc5 => ../../stayinalived

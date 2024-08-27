@@ -43,16 +43,18 @@ import (
 
 type Balancer struct {
 	Client ipvs.Client
-	Logger *vc5.Sub
+	Logger vc5.Logger
 	Link   *netlink.Link
 	IPSet  string
 
 	mutex sync.Mutex
-	state map[tuple]cue.Service
+	//state map[tuple]cue.Service
+	state map[vc5.Service]vc5.Manifest
 }
 
 type Stats = vc5.Stats
-type tcpstats = vc5.TCPStats
+
+//type tcpstats = vc5.TCPStats
 type KV = map[string]any
 type Summary = vc5.Summary
 type tuple struct {
@@ -106,8 +108,8 @@ func netlinkAddr(a netip.Addr) *netlink.Addr {
 	return nil
 }
 
-func (b *Balancer) INFO(s string, a ...any) { b.Logger.INFO(s, a...) }
-func (b *Balancer) ERR(s string, a ...any)  { b.Logger.ERR(s, a...) }
+//func (b *Balancer) INFO(s string, a ...any) { b.Logger.INFO(s, a...) }
+//func (b *Balancer) ERR(s string, a ...any)  { b.Logger.ERR(s, a...) }
 
 // arrange to call every 60 seconds to maintain ipset & vips
 func (b *Balancer) Maintain() {
@@ -143,9 +145,11 @@ func (b *Balancer) _maintain() {
 			netlink.AddrAdd(*b.Link, netlinkAddr(v))
 		}
 	}
+
 }
 
-func ipsetEntry(t tuple) *ipset.Entry {
+//func ipsetEntry(t tuple) *ipset.Entry {
+func ipsetEntry(t vc5.Service) *ipset.Entry {
 
 	var ip net.IP
 
@@ -159,18 +163,37 @@ func ipsetEntry(t tuple) *ipset.Entry {
 		return nil
 	}
 
-	return &ipset.Entry{IP: ip, Port: &(t.Port), Protocol: &(t.Protocol), Replace: true}
+	protocol := uint8(t.Protocol)
+
+	return &ipset.Entry{IP: ip, Port: &(t.Port), Protocol: &protocol, Replace: true}
 }
 
-func mapServices(services []cue.Service) map[tuple]cue.Service {
+/*
+func xmapServices(services []cue.Service) map[tuple]cue.Service {
 	target := map[tuple]cue.Service{}
 	for _, s := range services {
 		target[tuple{Address: s.Address, Port: s.Port, Protocol: s.Protocol}] = s
 	}
 	return target
 }
+*/
+func mapServices(services []vc5.Manifest) map[vc5.Service]vc5.Manifest {
 
-func (b *Balancer) configure(services []cue.Service) error {
+	target := map[vc5.Service]vc5.Manifest{}
+
+	for _, s := range services {
+		target[s.Service()] = s
+	}
+
+	return target
+}
+
+func (b *Balancer) Configure(services []vc5.Manifest) error {
+
+	from_ipvs := func(s ipvs.Service) vc5.Service {
+		return vc5.Service{Address: s.Address, Port: s.Port, Protocol: vc5.Protocol(s.Protocol)}
+	}
+
 	b.mutex.Lock()
 	defer b.mutex.Unlock()
 
@@ -189,14 +212,15 @@ func (b *Balancer) configure(services []cue.Service) error {
 			continue
 		}
 
-		key := tuple{Address: s.Service.Address, Port: s.Service.Port, Protocol: uint8(s.Service.Protocol)}
+		//key := tuple{Address: s.Service.Address, Port: s.Service.Port, Protocol: uint8(s.Service.Protocol)}
+		key := from_ipvs(s.Service)
 
 		if t, wanted := todo[key]; !wanted {
 
 			if err := b.Client.RemoveService(s.Service); err != nil {
-				b.ERR(logServRemove(s.Service).err(err))
+				//b.ERR(logServRemove(s.Service).err(err))
 			} else {
-				b.INFO(logServRemove(s.Service).log())
+				//b.INFO(logServRemove(s.Service).log())
 			}
 
 			if e := ipsetEntry(key); e != nil && b.IPSet != "" {
@@ -209,9 +233,9 @@ func (b *Balancer) configure(services []cue.Service) error {
 
 			if service != s.Service {
 				if err := b.Client.UpdateService(service); err != nil {
-					b.ERR(logServUpdate(service, s.Service).err(err))
+					//b.ERR(logServUpdate(service, s.Service).err(err))
 				} else {
-					b.INFO(logServUpdate(service, s.Service).log())
+					//b.INFO(logServUpdate(service, s.Service).log())
 				}
 			}
 
@@ -227,10 +251,10 @@ func (b *Balancer) configure(services []cue.Service) error {
 		drain := !s.Reset
 
 		if err := b.Client.CreateService(service); err != nil {
-			b.ERR(logServCreate(service).err(err))
+			//b.ERR(logServCreate(service).err(err))
 			continue
 		} else {
-			b.INFO(logServCreate(service).log())
+			//b.INFO(logServCreate(service).log())
 		}
 
 		b.destinations(service, drain, s.Destinations)
@@ -272,9 +296,9 @@ func (b *Balancer) destinations(s ipvs.Service, drain bool, destinations []cue.D
 		if t, wanted := target[key]; !wanted {
 
 			if err = b.Client.RemoveDestination(s, d.Destination); err != nil {
-				b.ERR(logDestRemove(s, d.Destination).err(err))
+				//b.ERR(logDestRemove(s, d.Destination).err(err))
 			} else {
-				b.INFO(logDestRemove(s, d.Destination).log())
+				//b.INFO(logDestRemove(s, d.Destination).log())
 			}
 
 		} else {
@@ -284,9 +308,9 @@ func (b *Balancer) destinations(s ipvs.Service, drain bool, destinations []cue.D
 			if destination != d.Destination {
 
 				if err := b.Client.UpdateDestination(s, destination); err != nil {
-					b.ERR(logDestUpdate(s, destination, d.Destination).err(err))
+					//b.ERR(logDestUpdate(s, destination, d.Destination).err(err))
 				} else {
-					b.INFO(logDestUpdate(s, destination, d.Destination).log())
+					//b.INFO(logDestUpdate(s, destination, d.Destination).log())
 				}
 			}
 
@@ -300,16 +324,16 @@ func (b *Balancer) destinations(s ipvs.Service, drain bool, destinations []cue.D
 		//destination.Address = netip.MustParseAddr("10.99.99.99") // force errors to test
 
 		if err := b.Client.CreateDestination(s, destination); err != nil {
-			b.ERR(logDestCreate(s, destination).err(err))
+			//b.ERR(logDestCreate(s, destination).err(err))
 		} else {
-			b.INFO(logDestCreate(s, destination).log())
+			//b.INFO(logDestCreate(s, destination).log())
 		}
 	}
 
 	return nil
 }
 
-func ipvsService(s cue.Service) ipvs.Service {
+func ipvsService(s vc5.Manifest) ipvs.Service {
 
 	scheduler, flags, _ := ipvsScheduler(s.Scheduler, s.Sticky)
 	netmask := netmask.MaskFrom4([4]byte{255, 255, 255, 255})
@@ -410,7 +434,14 @@ func (l *LE) log() (string, KV)        { return l.f, l.k }
 func (l *LE) err(e error) (string, KV) { l.k["error"] = e.Error(); return l.log() }
 func (l *LE) add(k string, e any) *LE  { l.k[k] = e; return l }
 
-func (b *Balancer) TCPStats() map[vc5.Instance]vc5.TCPStats {
+type TCPStats struct {
+	SYN_RECV    uint64
+	ESTABLISHED uint64
+	CLOSE       uint64
+	TIME_WAIT   uint64
+}
+
+func (b *Balancer) TCPStats() map[vc5.Instance]TCPStats {
 
 	type l4 struct {
 		ip   netip.Addr
@@ -424,7 +455,7 @@ func (b *Balancer) TCPStats() map[vc5.Instance]vc5.TCPStats {
 
 	re := regexp.MustCompile(`^(TCP)\s+([0-9A-F]+)\s+([0-9A-F]+)\s+([0-9A-F]+)\s+([0-9A-F]+)\s+([0-9A-F]+)\s+([0-9A-F]+)\s+(\S+)\s+(\d+)$`)
 
-	foo := map[vc5.Instance]vc5.TCPStats{}
+	foo := map[vc5.Instance]TCPStats{}
 
 	file, err := os.OpenFile("/proc/net/ip_vs_conn", os.O_RDONLY, os.ModePerm)
 	if err != nil {
@@ -569,7 +600,7 @@ func ipvsScheduler(scheduler string, sticky bool) (string, ipvs.Flags, error) {
 	return "wlc", flags, fmt.Errorf("%s is not a valid scheduler name", scheduler)
 }
 
-func (b *Balancer) Stats(s ipvs.Stats) (r Stats) {
+func (b *Balancer) xStats(s ipvs.Stats) (r Stats) {
 
 	r.IngressOctets = s.IncomingBytes
 	r.IngressPackets = s.IncomingPackets
@@ -611,59 +642,57 @@ func (b *Balancer) Destinations(s vc5.Service) (map[vc5.Destination]vc5.Stats, e
 	return stats, err
 }
 
-// interface method called by mon when a destination's heatlh status transitions up or down
-func (b *Balancer) Notify(instance mon.Instance, state bool) {
-	if logger := b.Logger; logger != nil {
-		logger.NOTICE("notify", notifyLog(instance, state))
-	}
-}
+func (b *Balancer) Stats() map[vc5.Instance]vc5.Stats {
+	stats := map[vc5.Instance]vc5.Stats{}
 
-// interface method called by mon every time a round of checks for a destination is completed
-func (b *Balancer) Result(instance mon.Instance, state bool, diagnostic string) {
-	// return // we log all probes anyway - no need for this
-	if logger := b.Logger; logger != nil {
-		logger.DEBUG("result", resultLog(instance, state, diagnostic))
-	}
-}
+	services, _ := b.Client.Services()
 
-func (b *Balancer) Check(instance mon.Instance, check string, round uint64, state bool, diagnostic string) {
-	// return // we log all probes anyway - no need for this
-	if logger := b.Logger; logger != nil {
-		logger.DEBUG("check", checkLog(instance, state, diagnostic, check, round))
-	}
-}
+	for _, s := range services {
+		protocol := vc5.Protocol(s.Service.Protocol)
+		service := vc5.Service{Address: s.Service.Address, Port: s.Service.Port, Protocol: protocol}
 
-func notifyLog(instance mon.Instance, status bool) map[string]any {
+		destinations, _ := b.Client.Destinations(s.Service)
 
-	proto := func(p uint8) string {
-		switch instance.Service.Protocol {
-		case TCP:
-			return "tcp"
-		case UDP:
-			return "udp"
+		for _, d := range destinations {
+
+			destination := vc5.Destination{Address: d.Destination.Address, Port: s.Service.Port}
+
+			instance := vc5.Instance{
+				Service:     service,
+				Destination: destination,
+			}
+
+			//r.IngressOctets = s.IncomingBytes
+			//r.IngressPackets = s.IncomingPackets
+			//r.EgressOctets = s.OutgoingBytes
+			//r.EgressPackets = s.OutgoingPackets
+			//r.Flows = s.Connections
+
+			stats[instance] = vc5.Stats{
+				IngressOctets:  d.Stats.IncomingBytes,
+				IngressPackets: d.Stats.IncomingPackets,
+				EgressOctets:   d.Stats.OutgoingBytes,
+				EgressPackets:  d.Stats.OutgoingPackets,
+				Flows:          d.Stats.Connections,
+				//Current:        d.Stats.Current, // FIXME
+			}
 		}
-		return fmt.Sprintf("%d", p)
 	}
 
-	return map[string]any{
-		"state": updown(status),
-		"proto": proto(instance.Service.Protocol),
-		"saddr": instance.Service.Address.String(),
-		"sport": instance.Service.Port,
-		"daddr": instance.Destination.Address.String(),
-		"dport": instance.Destination.Port,
+	return stats
+}
+
+func (b *Balancer) Summary() (r vc5.Summary) {
+
+	services, _ := b.Client.Services()
+
+	for _, s := range services {
+		r.IngressOctets += s.Stats.IncomingBytes
+		r.IngressPackets += s.Stats.IncomingPackets
+		r.EgressOctets += s.Stats.OutgoingBytes
+		r.EgressPackets += s.Stats.OutgoingPackets
+		r.Flows += s.Stats.Connections
 	}
-}
 
-func resultLog(instance mon.Instance, status bool, diagnostic string) map[string]any {
-	r := notifyLog(instance, status)
-	r["diagnostic"] = diagnostic
-	return r
-}
-
-func checkLog(instance mon.Instance, status bool, diagnostic string, check string, round uint64) map[string]any {
-	r := resultLog(instance, status, diagnostic)
-	r["check"] = check
-	r["round"] = round
-	return r
+	return
 }

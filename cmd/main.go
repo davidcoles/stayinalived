@@ -19,6 +19,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"flag"
 	"fmt"
@@ -28,15 +29,8 @@ import (
 	"net/netip"
 	"os"
 	"os/signal"
-	"runtime/debug"
-	"strconv"
-	"strings"
-	"sync"
 	"syscall"
 	"time"
-
-	"github.com/davidcoles/cue"
-	"github.com/davidcoles/cue/bgp"
 
 	lb "github.com/cloudflare/ipvs"
 	"github.com/vishvananda/netlink"
@@ -48,20 +42,17 @@ func main() {
 
 	F := "vc5"
 
-	var mutex sync.Mutex
-
-	start := time.Now()
 	webroot := flag.String("r", "", "webserver root directory")
 	webserver := flag.String("w", ":80", "webserver listen address")
 	addr := flag.String("a", "", "address")
 	ipset := flag.String("s", "", "ipset")
 	iface := flag.String("i", "", "interface to add VIPs to")
 	sni := flag.Bool("S", false, "Enable SNI mode for probes")
+	asn := flag.Uint("A", 0, "Autonomous system number to enable loopback BGP") // experimental - may change
 
 	flag.Parse()
 
 	args := flag.Args()
-
 	file := args[0]
 
 	config, err := vc5.Load(file)
@@ -74,15 +65,15 @@ func main() {
 		log.Fatal("Couldn't validate config file: ", err)
 	}
 
-	logs := &vc5.Sink{}
-	logs.Start(config.Logging_())
+	logs := vc5.NewLogger(config.HostID, config.LoggingConfig())
 
 	var link *netlink.Link
 	if *iface != "" {
 		l, err := netlink.LinkByName(*iface)
 		if err != nil {
-			logs.EMERG(F, "Couldn't open netlink:", err)
-			log.Fatal(err)
+			//logs.EMERG(F, "Couldn't open netlink:", err)
+			//log.Fatal(err)
+			logs.Fatal(F, "netlink", KV{"error.message": err.Error()})
 		}
 		link = &l
 	}
@@ -102,7 +93,7 @@ func main() {
 	address := netip.MustParseAddr(*addr)
 
 	if !address.Is4() {
-		logs.EMERG(F, "Address is not IPv4:", address)
+		//logs.EMERG(F, "Address is not IPv4:", address)
 		log.Fatal("Address is not IPv4: ", address)
 	}
 
@@ -126,274 +117,45 @@ func main() {
 	client, err := NewClient()
 
 	if err != nil {
-		logs.EMERG(F, "Couldn't start client (check IPVS modules are loaded):", err)
+		//logs.EMERG(F, "Couldn't start client (check IPVS modules are loaded):", err)
 		log.Fatal("Couldn't start client (check IPVS modules are loaded):", err)
 	}
 
-	pool := bgp.NewPool(address.As4(), config.BGP, nil, logs.Sub("bgp"))
-
-	if pool == nil {
-		log.Fatal("BGP pool fail")
-	}
+	routerID := address.As4()
 
 	balancer := &Balancer{
 		Client: client,
-		Logger: logs.Sub("ipvs"),
+		Logger: logs.Sub("balancer"),
 		Link:   link,
 		IPSet:  *ipset,
 	}
 
-	director := &cue.Director{
+	// context to use for shutting down services when we're about to exit
+	ctx, shutdown := context.WithCancel(context.Background())
+
+	// The manager handles the main event loop, healthchecks, requests
+	// for the console/metrics, sets up BGP sessions, etc.
+	manager := vc5.Manager{
+		Config:   config,
+		Balancer: balancer,
+		Logs:     logs,
+		RouterID: routerID,     // BGP router ID to use to speak to peers
+		LocalBGP: uint16(*asn), // If non-zero then loopback BGP is activated
+		WebRoot:  *webroot,
 		Address:  address,
-		Notifier: balancer,
 		SNI:      *sni,
 	}
 
-	err = director.Start(config.Parse())
-
-	if err != nil {
-		logs.EMERG(F, "Couldn't start director:", err)
-		log.Fatal(err)
+	if err := manager.Manage(ctx, listener); err != nil {
+		logs.Fatal(F, "manager", KV{"error.message": "Couldn't start manager: " + err.Error()})
 	}
 
-	done := make(chan bool)
+	// We are succesfully up and running, so send a high priority
+	// alert to let the world know - perhaps we crashed previously and
+	// were restarted by the service manager
+	logs.Alert(vc5.ALERT, F, "initialised", KV{}, "Initialised")
 
-	vip := map[netip.Addr]vc5.State{}
-
-	var rib []netip.Addr
-	var summary Summary
-
-	services, old, _ := vc5.ServiceStatus(config, balancer, director, nil)
-
-	go func() {
-		ticker := time.NewTicker(time.Minute)
-		defer ticker.Stop()
-		for {
-			select {
-			case <-ticker.C:
-			case <-done:
-				return
-			}
-			balancer.Maintain()
-		}
-	}()
-
-	go func() {
-		ticker := time.NewTicker(10 * time.Second)
-		defer ticker.Stop()
-		for {
-			mutex.Lock()
-			//summary.update(client, uint64(time.Now().Sub(start)/time.Second))
-			summary.Update(balancer.summary(), start)
-			services, old, summary.Current = vc5.ServiceStatus(config, balancer, director, old)
-			mutex.Unlock()
-			select {
-			case <-ticker.C:
-			case <-done:
-				return
-			}
-		}
-	}()
-
-	go func() { // advertise VIPs via BGP
-		timer := time.NewTimer(config.Learn * time.Second)
-		ticker := time.NewTicker(5 * time.Second)
-		services := director.Status()
-
-		defer func() {
-			ticker.Stop()
-			timer.Stop()
-			pool.RIB(nil)
-			time.Sleep(2 * time.Second)
-			pool.Close()
-		}()
-
-		var initialised bool
-		for {
-			select {
-			case <-ticker.C: // check for matured VIPs
-			case <-director.C: // a backend has changed state
-				//services = director.Status()
-				mutex.Lock()
-				services = director.Status()
-				balancer.configure(services)
-				mutex.Unlock()
-			case <-done: // shuting down
-				return
-			case <-timer.C:
-				logs.NOTICE(F, KV{"event": "Learn timer expired"})
-				initialised = true
-			}
-
-			mutex.Lock()
-			vip = vc5.VipState(services, vip, config.Priorities(), logs)
-			rib = vc5.AdjRIBOut(vip, initialised)
-			mutex.Unlock()
-
-			pool.RIB(rib)
-		}
-	}()
-
-	log.Println("Initialised")
-
-	static := http.FS(vc5.STATIC)
-	var fs http.FileSystem
-
-	if *webroot != "" {
-		fs = http.FileSystem(http.Dir(*webroot))
-	}
-
-	http.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
-
-		if fs != nil {
-			file := r.URL.Path
-			if file == "/" {
-				file = "/index.html"
-			}
-
-			if f, err := fs.Open(file); err == nil {
-				f.Close()
-				http.FileServer(fs).ServeHTTP(w, r)
-				return
-			}
-		}
-
-		r.URL.Path = "static/" + r.URL.Path
-		http.FileServer(static).ServeHTTP(w, r)
-	})
-
-	http.HandleFunc("/log/", func(w http.ResponseWriter, r *http.Request) {
-
-		start, _ := strconv.ParseUint(r.URL.Path[5:], 10, 64)
-		logs := logs.Get(start)
-		js, err := json.MarshalIndent(&logs, " ", " ")
-		if err != nil {
-			w.WriteHeader(http.StatusInternalServerError)
-			return
-		}
-		w.Header().Set("Content-Type", "application/json")
-		w.Write(js)
-		w.Write([]byte("\n"))
-	})
-
-	http.HandleFunc("/build.json", func(w http.ResponseWriter, r *http.Request) {
-		info, ok := debug.ReadBuildInfo()
-		if !ok {
-			w.WriteHeader(http.StatusNotFound)
-			return
-		}
-
-		js, err := json.MarshalIndent(info, " ", " ")
-		if err != nil {
-			w.WriteHeader(http.StatusInternalServerError)
-			return
-		}
-		w.Header().Set("Content-Type", "application/json")
-		w.Write(js)
-		w.Write([]byte("\n"))
-	})
-
-	// // Remove this if migrating to a different load balancing engine
-	http.HandleFunc("/lb.json", func(w http.ResponseWriter, r *http.Request) {
-		var ret []interface{}
-		type status struct {
-			Service      lb.ServiceExtended
-			Destinations []lb.DestinationExtended
-		}
-		info, _ := client.Info()
-		svcs, _ := client.Services()
-		for _, se := range svcs {
-			dsts, _ := client.Destinations(se.Service)
-			ret = append(ret, status{Service: se, Destinations: dsts})
-		}
-		//js, err := json.MarshalIndent(&ret, " ", " ")
-		js, err := json.MarshalIndent(struct {
-			Info     any
-			Services []any
-		}{
-			Info:     info,
-			Services: ret,
-		}, "", " ")
-		if err != nil {
-			w.WriteHeader(http.StatusInternalServerError)
-			return
-		}
-		w.Header().Set("Content-Type", "application/json")
-		w.Write(js)
-		w.Write([]byte("\n"))
-	})
-
-	http.HandleFunc("/config.json", func(w http.ResponseWriter, r *http.Request) {
-
-		config.Address = *addr
-		config.Webserver = *webserver
-		config.Webroot = *webroot
-
-		js, err := json.MarshalIndent(config, " ", " ")
-		if err != nil {
-			w.WriteHeader(http.StatusInternalServerError)
-			return
-		}
-		w.Header().Set("Content-Type", "application/json")
-		w.Write(js)
-		w.Write([]byte("\n"))
-	})
-
-	http.HandleFunc("/cue.json", func(w http.ResponseWriter, r *http.Request) {
-		js, err := json.MarshalIndent(director.Status(), " ", " ")
-		if err != nil {
-			w.WriteHeader(http.StatusInternalServerError)
-			return
-		}
-		w.Header().Set("Content-Type", "application/json")
-		w.Write(js)
-		w.Write([]byte("\n"))
-	})
-
-	http.HandleFunc("/status.json", func(w http.ResponseWriter, r *http.Request) {
-		mutex.Lock()
-		js, err := json.MarshalIndent(struct {
-			Summary  Summary                `json:"summary"`
-			Services map[vc5.VIP][]vc5.Serv `json:"services"`
-			BGP      map[string]bgp.Status  `json:"bgp"`
-			VIP      []vc5.VIPStats         `json:"vip"`
-			RIB      []netip.Addr           `json:"rib"`
-			Logging  vc5.LogStats           `json:"logging"`
-		}{
-			Summary:  summary,
-			Services: services,
-			BGP:      pool.Status(),
-			VIP:      vc5.VipStatus(services, vip),
-			RIB:      rib,
-			Logging:  logs.Stats(),
-		}, " ", " ")
-		mutex.Unlock()
-
-		if err != nil {
-			w.WriteHeader(http.StatusInternalServerError)
-			return
-		}
-
-		w.Header().Set("Content-Type", "application/json")
-		w.Write(js)
-		w.Write([]byte("\n"))
-	})
-
-	http.HandleFunc("/metrics", func(w http.ResponseWriter, r *http.Request) {
-
-		mutex.Lock()
-		metrics := vc5.Prometheus("stayinalived", services, summary, vip)
-		mutex.Unlock()
-
-		w.Header().Set("Content-Type", "text/plain")
-		w.Write([]byte(strings.Join(metrics, "\n") + "\n"))
-	})
-
-	go func() {
-		server := http.Server{}
-		log.Fatal(server.Serve(listener))
-	}()
-
+	// We now wait for signals to tell us to reload the configuration file or exit
 	sig := make(chan os.Signal, 10)
 	signal.Notify(sig, syscall.SIGUSR2, syscall.SIGINT, syscall.SIGTERM, syscall.SIGQUIT)
 
@@ -402,37 +164,29 @@ func main() {
 		case syscall.SIGINT:
 			fallthrough
 		case syscall.SIGUSR2:
-			logs.NOTICE(F, "Reload signal received")
-
-			conf, err := vc5.Load(file)
-
-			if err != nil {
-				logs.ALERT(F, "Couldn't load config file: ", file, err)
-				break
+			logs.Alert(vc5.NOTICE, F, "reload", KV{}, "Reload signal received")
+			conf, err := vc5.Load(file) // FIXME - validate!
+			if err == nil {
+				config = conf
+				config.Address = *addr
+				config.Webserver = *webserver
+				config.Webroot = *webroot
+				manager.Configure(conf)
+			} else {
+				text := "Couldn't load config file " + file + " :" + err.Error()
+				logs.Alert(vc5.ALERT, F, "config", KV{"file.path": file, "error.message": err.Error()}, text)
 			}
-
-			if err = validate(conf); err != nil {
-				logs.ALERT(F, "Couldn't validate config file: ", file, err)
-				break
-			}
-
-			mutex.Lock()
-			config = conf
-			director.Configure(config.Parse())
-			pool.Configure(config.BGP)
-			mutex.Unlock()
 
 		case syscall.SIGTERM:
 			fallthrough
 		case syscall.SIGQUIT:
-			logs.ALERT(F, "Shutting down")
-			fmt.Println("CLOSING")
-			close(done) // shut down BGP, etc
+			shutdown() // cancel context to shut down BGP, etc
+			logs.Alert(vc5.ALERT, F, "exiting", KV{}, "Exiting")
 			time.Sleep(4 * time.Second)
-			fmt.Println("DONE")
 			return
 		}
 	}
+
 }
 
 func validate(config *vc5.Config) error {
@@ -457,13 +211,48 @@ func bgpListener(l net.Listener, logs vc5.Logger) {
 		conn, err := l.Accept()
 
 		if err != nil {
-			logs.ERR(F, "Failed to accept connection", err)
+			logs.Event(vc5.ERR, F, "accept", KV{"error.message": err.Error()})
 		} else {
 			go func(c net.Conn) {
-				logs.INFO(F, "Accepted connection from", conn.RemoteAddr())
+				logs.Event(vc5.INFO, F, "accept", KV{"client.address": conn.RemoteAddr().String()})
 				defer c.Close()
 				time.Sleep(time.Second * 10)
 			}(conn)
 		}
 	}
+}
+func httpEndpoints(client Client) {
+
+	// Remove this if migrating to a different load balancing engine
+	http.HandleFunc("/lb.json", func(w http.ResponseWriter, r *http.Request) {
+		var ret []interface{}
+		type status struct {
+			Service      lb.ServiceExtended
+			Destinations []lb.DestinationExtended
+		}
+		info, _ := client.Info()
+		svcs, _ := client.Services()
+		for _, se := range svcs {
+			dsts, _ := client.Destinations(se.Service)
+			ret = append(ret, status{Service: se, Destinations: dsts})
+		}
+
+		js, err := json.MarshalIndent(struct {
+			Info     any
+			Services []any
+		}{
+			Info:     info,
+			Services: ret,
+		}, "", " ")
+
+		if err != nil {
+			w.WriteHeader(http.StatusInternalServerError)
+			return
+		}
+
+		js = append(js, 0x0a)
+		w.Header().Set("Content-Type", "application/json")
+		w.Write(js)
+	})
+
 }
