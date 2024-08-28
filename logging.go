@@ -155,8 +155,9 @@ func (s *sink) Event(n uint8, f, a string, e map[string]any)              { s.ev
 func (s *sink) Alert(n uint8, f, a string, e map[string]any, t ...string) { s.alert(n, f, a, e, t...) }
 func (s *sink) State(f, a string, e map[string]any)                       { s.state(f, a, e) }
 
-func (s *sink) Fatal(f string, a string, e map[string]any) {
-	s.Alert(EMERG, f, a, e)
+func (s *sink) Fatal(f string, a string, e map[string]any, t ...string) {
+	s.Alert(EMERG, f, a, e, t...)
+	time.Sleep(5 * time.Second)
 	log.Fatal(fmt.Sprint(f, a, e))
 }
 

@@ -33,7 +33,6 @@ import (
 )
 
 // TODO:
-// * put logging back in
 // * merge manager changes back to vc5 repo
 
 func main() {
@@ -49,6 +48,7 @@ func main() {
 	iface := flag.String("i", "", "interface to add VIPs to")
 	sni := flag.Bool("S", false, "Enable SNI mode for probes")
 	asn := flag.Uint("A", 0, "Autonomous system number to enable loopback BGP") // experimental - may change
+	hardfail := flag.Bool("H", false, "Hard fail on configuration apply")       // experimental - may change
 
 	flag.Parse()
 
@@ -88,21 +88,20 @@ func main() {
 
 	routerID := address.As4()
 
-	var listener net.Listener
+	var webListener, bgpListener net.Listener
 
 	if *webserver != "" {
-		listener, err = net.Listen("tcp", *webserver)
+		webListener, err = net.Listen("tcp", *webserver)
 		if err != nil {
 			log.Fatal(err)
 		}
 	}
 
 	if config.Listen {
-		l, err := net.Listen("tcp", ":179")
+		bgpListener, err = net.Listen("tcp", ":179")
 		if err != nil {
 			log.Fatal("Couldn't listen on BGP port", err)
 		}
-		go bgpListener(l, logs.Sub("bgp"))
 	}
 
 	client, err := NewClient()
@@ -125,7 +124,6 @@ func main() {
 	// by the manager object (which handles the main event loop)
 	balancer := &Balancer{
 		Client: client,
-		Logger: logs.Sub("balancer"),
 		Link:   *iface,
 		IPSet:  *ipset,
 	}
@@ -135,20 +133,24 @@ func main() {
 		logs.Fatal(F, "balancer", KV{"error.message": err.Error()})
 	}
 
+	*hardfail = true
+
 	// The manager handles the main event loop, healthchecks, requests
 	// for the console/metrics, sets up BGP sessions, etc.
-	manager := vc5.Manager{
-		Config:   config,
-		Balancer: balancer,
-		Logs:     logs,
-		WebRoot:  *webroot,     // Serve static files from this directory
-		RouterID: routerID,     // BGP router ID to use to speak to peers
-		LocalBGP: uint16(*asn), // If non-zero then loopback BGP is activated
-		Address:  address,      // Required for SYN probes
-		SNI:      *sni,         // Needs to be true for servers tha are picky about SNI names
+	manager := &vc5.Manager{
+		Balancer:    balancer,
+		Logs:        logs,
+		Address:     address,      // Required for SYN probes
+		RouterID:    routerID,     // BGP router ID to use to speak to peers
+		SNI:         *sni,         // Needs to be true for servers that are picky about SNI names (should really be the default)
+		WebRoot:     *webroot,     // Serve static files from this directory
+		BGPLoopback: uint16(*asn), // If non-zero then loopback BGP is activated
+		BGPListener: bgpListener,  // Listen for incoming BGP connections if not nil
+		WebListener: webListener,  // Listen for incoming web connections if not nil
+		HardFail:    *hardfail,    // Exit if the balancer's Configure() argment returns an error (should really be the default)
 	}
 
-	if err := manager.Manage(ctx, listener); err != nil {
+	if err := manager.Manage(ctx, config); err != nil {
 		logs.Fatal(F, "manager", KV{"error.message": "Couldn't start manager: " + err.Error()})
 	}
 
@@ -189,25 +191,6 @@ func main() {
 		case syscall.SIGQUIT:
 			logs.Alert(vc5.ALERT, F, "exiting", KV{}, "Exiting")
 			return
-		}
-	}
-
-}
-
-func bgpListener(l net.Listener, logs vc5.Logger) {
-	F := "listener"
-
-	for {
-		conn, err := l.Accept()
-
-		if err != nil {
-			logs.Event(vc5.ERR, F, "accept", KV{"error.message": err.Error()})
-		} else {
-			go func(c net.Conn) {
-				logs.Event(vc5.INFO, F, "accept", KV{"client.address": conn.RemoteAddr().String()})
-				defer c.Close()
-				time.Sleep(time.Second * 10)
-			}(conn)
 		}
 	}
 }

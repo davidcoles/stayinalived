@@ -43,7 +43,6 @@ import (
 
 type Balancer struct {
 	Client ipvs.Client
-	Logger vc5.Logger
 	Link   string
 	IPSet  string
 
@@ -70,9 +69,6 @@ func netlinkAddr(a netip.Addr) *netlink.Addr {
 
 	return nil
 }
-
-//func (b *Balancer) INFO(s string, a ...any) { b.Logger.INFO(s, a...) }
-//func (b *Balancer) ERR(s string, a ...any)  { b.Logger.ERR(s, a...) }
 
 func (b *Balancer) start(ctx context.Context) error {
 
@@ -212,9 +208,7 @@ func (b *Balancer) Configure(services []vc5.Manifest) error {
 		if t, wanted := todo[key]; !wanted {
 
 			if err := b.Client.RemoveService(s.Service); err != nil {
-				//b.ERR(logServRemove(s.Service).err(err))
-			} else {
-				//b.INFO(logServRemove(s.Service).log())
+				return fmt.Errorf("RemoveService(%s) failed: %s", key, err.Error())
 			}
 
 			if e := ipsetEntry(key); e != nil && b.IPSet != "" {
@@ -227,31 +221,30 @@ func (b *Balancer) Configure(services []vc5.Manifest) error {
 
 			if service != s.Service {
 				if err := b.Client.UpdateService(service); err != nil {
-					//b.ERR(logServUpdate(service, s.Service).err(err))
-				} else {
-					//b.INFO(logServUpdate(service, s.Service).log())
+					return fmt.Errorf("UpdateService(%s) failed: %s", key, err.Error())
 				}
 			}
 
-			b.destinations(s.Service, drain, t.Destinations)
+			if err := b.destinations(s.Service, drain, t.Destinations); err != nil {
+				return err
+			}
 
 			delete(todo, key) // no need to create as it exists - take off the todo list
 		}
 	}
 
 	// create any non-existing services
-	for _, s := range todo {
+	for key, s := range todo {
 		service := ipvsService(s)
 		drain := !s.Reset
 
 		if err := b.Client.CreateService(service); err != nil {
-			//b.ERR(logServCreate(service).err(err))
-			continue
-		} else {
-			//b.INFO(logServCreate(service).log())
+			return fmt.Errorf("CreateService(%s) failed: %s", key, err.Error())
 		}
 
-		b.destinations(service, drain, s.Destinations)
+		if err := b.destinations(service, drain, s.Destinations); err != nil {
+			return err
+		}
 	}
 
 	// remove any addresses which are no longer active
@@ -272,7 +265,8 @@ func (b *Balancer) Configure(services []vc5.Manifest) error {
 
 func (b *Balancer) destinations(s ipvs.Service, drain bool, destinations []vc5.Backend) error {
 
-	//dest := vc5.Destination{Address: d.Address, Port: d.Port}
+	svc := vc5.Service{Address: s.Address, Port: s.Port, Protocol: vc5.Protocol(s.Protocol)}
+
 	target := map[vc5.Destination]vc5.Backend{}
 
 	for _, d := range destinations {
@@ -282,7 +276,7 @@ func (b *Balancer) destinations(s ipvs.Service, drain bool, destinations []vc5.B
 		}
 	}
 
-	dsts, err := b.Client.Destinations(s)
+	dsts, _ := b.Client.Destinations(s)
 
 	// above errors with "file does not exist" when no destinations present - which seems unhelpful
 	//if err != nil {
@@ -291,43 +285,35 @@ func (b *Balancer) destinations(s ipvs.Service, drain bool, destinations []vc5.B
 
 	for _, d := range dsts {
 
-		//key := ipport{Address: d.Address, Port: d.Port}
 		key := vc5.Destination{Address: d.Address, Port: d.Port}
 
 		if t, wanted := target[key]; !wanted {
 
-			if err = b.Client.RemoveDestination(s, d.Destination); err != nil {
-				//b.ERR(logDestRemove(s, d.Destination).err(err))
-			} else {
-				//b.INFO(logDestRemove(s, d.Destination).log())
+			// this destination exists in the kernel but is no longer wanted - remove it
+			if err := b.Client.RemoveDestination(s, d.Destination); err != nil {
+				return fmt.Errorf("RemoveDestination(%s, %s) failed: %s", svc, key, err.Error())
 			}
 
 		} else {
 
+			// this destination exists in the kernel and is still wanted
 			destination := ipvsDestination(t)
 
 			if destination != d.Destination {
-
+				// if the settings for the destination in the kernel is not quite right then update it
 				if err := b.Client.UpdateDestination(s, destination); err != nil {
-					//b.ERR(logDestUpdate(s, destination, d.Destination).err(err))
-				} else {
-					//b.INFO(logDestUpdate(s, destination, d.Destination).log())
+					return fmt.Errorf("UpdateDestination(%s, %s) failed: %s", svc, key, err.Error())
 				}
 			}
 
-			delete(target, key)
+			delete(target, key) // we don't need to create this in the next stage, so forget about it
 		}
 	}
 
-	for _, d := range target {
-
-		destination := ipvsDestination(d)
-		//destination.Address = netip.MustParseAddr("10.99.99.99") // force errors to test
-
-		if err := b.Client.CreateDestination(s, destination); err != nil {
-			//b.ERR(logDestCreate(s, destination).err(err))
-		} else {
-			//b.INFO(logDestCreate(s, destination).log())
+	// create any destinations which don't exist in the kernel
+	for key, d := range target {
+		if err := b.Client.CreateDestination(s, ipvsDestination(d)); err != nil {
+			return fmt.Errorf("CreateDestination(%s, %s) failed: %s", svc, key, err.Error())
 		}
 	}
 
@@ -337,19 +323,19 @@ func (b *Balancer) destinations(s ipvs.Service, drain bool, destinations []vc5.B
 func ipvsService(s vc5.Manifest) ipvs.Service {
 
 	scheduler, flags, _ := ipvsScheduler(s.Scheduler, s.Sticky)
-	netmask := netmask.MaskFrom4([4]byte{255, 255, 255, 255})
-
+	mask := netmask.MaskFrom4([4]byte{255, 255, 255, 255})
 	family := ipvs.INET
 
 	if s.Address.Is6() {
 		family = ipvs.INET6
+		mask = netmask.MaskFrom16([16]byte{255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255})
 	}
 
 	return ipvs.Service{
 		Address:   s.Address,
 		Port:      s.Port,
 		Protocol:  ipvs.Protocol(s.Protocol),
-		Netmask:   netmask,
+		Netmask:   mask,
 		Scheduler: scheduler,
 		Flags:     flags,
 		Family:    family,
