@@ -59,128 +59,51 @@ func NewClient() (ipvs.Client, error) {
 	return ipvs.New()
 }
 
-func netlinkAddr(a netip.Addr) *netlink.Addr {
+func (b *Balancer) Stats() map[vc5.Instance]vc5.Stats {
 
-	if p, err := a.Prefix(a.BitLen()); err == nil {
-		if i, err := netlink.ParseAddr(p.String()); err == nil {
-			return i
-		}
-	}
+	tcpstats := b.tcpStats()
 
-	return nil
-}
+	stats := map[vc5.Instance]vc5.Stats{}
 
-func (b *Balancer) start(ctx context.Context) error {
+	services, _ := b.Client.Services()
+	for _, s := range services {
 
-	if b.Link != "" {
-		l, err := netlink.LinkByName(b.Link)
-		if err != nil {
-			return err
-		}
-		b.link = &l
-	}
+		destinations, _ := b.Client.Destinations(s.Service)
+		for _, d := range destinations {
 
-	b.maintain = make(chan bool, 1)
-
-	go func() {
-		ticker := time.NewTicker(60 * time.Second)
-		defer ticker.Stop()
-
-		for {
-			select {
-			case <-ticker.C:
-			case <-b.maintain:
-			case <-ctx.Done():
-				b._maintain(true)
-				return
+			instance := vc5.Instance{
+				Service:     from_ipvs(s.Service),
+				Destination: vc5.Destination{Address: d.Destination.Address, Port: d.Destination.Port},
 			}
 
-			b._maintain(false)
-		}
-	}()
-
-	return nil
-}
-
-func _vips(state map[vc5.Service]vc5.Manifest) map[netip.Addr]bool {
-	vips := map[netip.Addr]bool{}
-
-	for t, _ := range state {
-		vips[t.Address] = true
-	}
-
-	return vips
-}
-
-// arrange to call every 60 seconds to maintain ipset & vips
-func (b *Balancer) _maintain(fin bool) {
-	b.mutex.Lock()
-	defer b.mutex.Unlock()
-
-	ipset.Create(b.IPSet, "hash:ip,port", ipset.CreateOptions{Timeout: 90, Replace: true})
-
-	if fin {
-		for t, _ := range b.state {
-			if e := ipsetEntry(t); e != nil && b.IPSet != "" {
-				ipset.Del(b.IPSet, e)
+			tcp := tcpstats[instance]
+			stats[instance] = vc5.Stats{
+				IngressOctets:  d.Stats.IncomingBytes,
+				IngressPackets: d.Stats.IncomingPackets,
+				EgressOctets:   d.Stats.OutgoingBytes,
+				EgressPackets:  d.Stats.OutgoingPackets,
+				Flows:          d.Stats.Connections,
+				Current:        tcp.ESTABLISHED,
 			}
 		}
-
-		for v, _ := range _vips(b.state) {
-			if addr := netlinkAddr(v); b.link != nil && addr != nil {
-				netlink.AddrDel(*b.link, netlinkAddr(v))
-			}
-		}
-
-		return
 	}
 
-	for t, _ := range b.state {
-		if e := ipsetEntry(t); e != nil && b.IPSet != "" {
-			ipset.Add(b.IPSet, e)
-		}
-	}
-
-	for v, _ := range _vips(b.state) {
-		if addr := netlinkAddr(v); b.link != nil && addr != nil {
-			netlink.AddrAdd(*b.link, netlinkAddr(v))
-		}
-	}
-
+	return stats
 }
 
-func ipsetEntry(t vc5.Service) *ipset.Entry {
+func (b *Balancer) Summary() (r vc5.Summary) {
 
-	var ip net.IP
-
-	if t.Address.Is4() {
-		ip4 := t.Address.As4()
-		ip = ip4[:]
-	} else if t.Address.Is6() {
-		ip6 := t.Address.As16()
-		ip = ip6[:]
-	} else {
-		return nil
-	}
-
-	protocol := uint8(t.Protocol)
-
-	return &ipset.Entry{IP: ip, Port: &(t.Port), Protocol: &protocol, Replace: true}
-}
-
-func mapServices(services []vc5.Manifest) map[vc5.Service]vc5.Manifest {
-
-	target := map[vc5.Service]vc5.Manifest{}
+	services, _ := b.Client.Services()
 
 	for _, s := range services {
-		target[s.Service()] = s
+		r.IngressOctets += s.Stats.IncomingBytes
+		r.IngressPackets += s.Stats.IncomingPackets
+		r.EgressOctets += s.Stats.OutgoingBytes
+		r.EgressPackets += s.Stats.OutgoingPackets
+		r.Flows += s.Stats.Connections
 	}
 
-	return target
-}
-
-func from_ipvs(s ipvs.Service) vc5.Service {
-	return vc5.Service{Address: s.Address, Port: s.Port, Protocol: vc5.Protocol(s.Protocol)}
+	return
 }
 
 func (b *Balancer) Configure(services []vc5.Manifest) error {
@@ -320,6 +243,130 @@ func (b *Balancer) destinations(s ipvs.Service, drain bool, destinations []vc5.B
 	return nil
 }
 
+func (b *Balancer) start(ctx context.Context) error {
+
+	if b.Link != "" {
+		l, err := netlink.LinkByName(b.Link)
+		if err != nil {
+			return err
+		}
+		b.link = &l
+	}
+
+	b.maintain = make(chan bool, 1)
+
+	go func() {
+		ticker := time.NewTicker(60 * time.Second)
+		defer ticker.Stop()
+
+		for {
+			select {
+			case <-ticker.C:
+			case <-b.maintain:
+			case <-ctx.Done():
+				b._maintain(true)
+				return
+			}
+
+			b._maintain(false)
+		}
+	}()
+
+	return nil
+}
+
+// arrange to call every 60 seconds to maintain ipset & vips
+func (b *Balancer) _maintain(fin bool) {
+	b.mutex.Lock()
+	defer b.mutex.Unlock()
+
+	ipset.Create(b.IPSet, "hash:ip,port", ipset.CreateOptions{Timeout: 90, Replace: true})
+
+	if fin {
+		for t, _ := range b.state {
+			if e := ipsetEntry(t); e != nil && b.IPSet != "" {
+				ipset.Del(b.IPSet, e)
+			}
+		}
+
+		for v, _ := range _vips(b.state) {
+			if addr := netlinkAddr(v); b.link != nil && addr != nil {
+				netlink.AddrDel(*b.link, netlinkAddr(v))
+			}
+		}
+
+		return
+	}
+
+	for t, _ := range b.state {
+		if e := ipsetEntry(t); e != nil && b.IPSet != "" {
+			ipset.Add(b.IPSet, e)
+		}
+	}
+
+	for v, _ := range _vips(b.state) {
+		if addr := netlinkAddr(v); b.link != nil && addr != nil {
+			netlink.AddrAdd(*b.link, netlinkAddr(v))
+		}
+	}
+
+}
+
+func netlinkAddr(a netip.Addr) *netlink.Addr {
+
+	if p, err := a.Prefix(a.BitLen()); err == nil {
+		if i, err := netlink.ParseAddr(p.String()); err == nil {
+			return i
+		}
+	}
+
+	return nil
+}
+
+func _vips(state map[vc5.Service]vc5.Manifest) map[netip.Addr]bool {
+	vips := map[netip.Addr]bool{}
+
+	for t, _ := range state {
+		vips[t.Address] = true
+	}
+
+	return vips
+}
+
+func ipsetEntry(t vc5.Service) *ipset.Entry {
+
+	var ip net.IP
+
+	if t.Address.Is4() {
+		ip4 := t.Address.As4()
+		ip = ip4[:]
+	} else if t.Address.Is6() {
+		ip6 := t.Address.As16()
+		ip = ip6[:]
+	} else {
+		return nil
+	}
+
+	protocol := uint8(t.Protocol)
+
+	return &ipset.Entry{IP: ip, Port: &(t.Port), Protocol: &protocol, Replace: true}
+}
+
+func mapServices(services []vc5.Manifest) map[vc5.Service]vc5.Manifest {
+
+	target := map[vc5.Service]vc5.Manifest{}
+
+	for _, s := range services {
+		target[s.Service()] = s
+	}
+
+	return target
+}
+
+func from_ipvs(s ipvs.Service) vc5.Service {
+	return vc5.Service{Address: s.Address, Port: s.Port, Protocol: vc5.Protocol(s.Protocol)}
+}
+
 func ipvsService(s vc5.Manifest) ipvs.Service {
 
 	scheduler, flags, _ := ipvsScheduler(s.Scheduler, s.Sticky)
@@ -366,14 +413,14 @@ func ipvsDestination(d vc5.Backend) ipvs.Destination {
 	}
 }
 
-type TCPStats struct {
+type tcpstats struct {
 	SYN_RECV    uint64
 	ESTABLISHED uint64
 	CLOSE       uint64
 	TIME_WAIT   uint64
 }
 
-func (b *Balancer) TCPStats() map[vc5.Instance]TCPStats {
+func (b *Balancer) tcpStats() map[vc5.Instance]tcpstats {
 
 	type l4 struct {
 		ip   netip.Addr
@@ -387,7 +434,7 @@ func (b *Balancer) TCPStats() map[vc5.Instance]TCPStats {
 
 	re := regexp.MustCompile(`^(TCP)\s+([0-9A-F]+)\s+([0-9A-F]+)\s+([0-9A-F]+)\s+([0-9A-F]+)\s+([0-9A-F]+)\s+([0-9A-F]+)\s+(\S+)\s+(\d+)$`)
 
-	stats := map[vc5.Instance]TCPStats{}
+	stats := map[vc5.Instance]tcpstats{}
 
 	file, err := os.OpenFile("/proc/net/ip_vs_conn", os.O_RDONLY, os.ModePerm)
 	if err != nil {
@@ -532,53 +579,6 @@ func updown(b bool) string {
 		return "up"
 	}
 	return "down"
-}
-
-func (b *Balancer) Stats() map[vc5.Instance]vc5.Stats {
-
-	tcpstats := b.TCPStats()
-
-	stats := map[vc5.Instance]vc5.Stats{}
-
-	services, _ := b.Client.Services()
-	for _, s := range services {
-
-		destinations, _ := b.Client.Destinations(s.Service)
-		for _, d := range destinations {
-
-			instance := vc5.Instance{
-				Service:     from_ipvs(s.Service),
-				Destination: vc5.Destination{Address: d.Destination.Address, Port: d.Destination.Port},
-			}
-
-			tcp := tcpstats[instance]
-			stats[instance] = vc5.Stats{
-				IngressOctets:  d.Stats.IncomingBytes,
-				IngressPackets: d.Stats.IncomingPackets,
-				EgressOctets:   d.Stats.OutgoingBytes,
-				EgressPackets:  d.Stats.OutgoingPackets,
-				Flows:          d.Stats.Connections,
-				Current:        tcp.ESTABLISHED,
-			}
-		}
-	}
-
-	return stats
-}
-
-func (b *Balancer) Summary() (r vc5.Summary) {
-
-	services, _ := b.Client.Services()
-
-	for _, s := range services {
-		r.IngressOctets += s.Stats.IncomingBytes
-		r.IngressPackets += s.Stats.IncomingPackets
-		r.EgressOctets += s.Stats.OutgoingBytes
-		r.EgressPackets += s.Stats.OutgoingPackets
-		r.Flows += s.Stats.Connections
-	}
-
-	return
 }
 
 func validate(config *vc5.Config) error {
