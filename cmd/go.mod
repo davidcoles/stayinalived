@@ -10,7 +10,7 @@ require (
 )
 
 require (
-	github.com/davidcoles/cue v0.1.3 // indirect
+	github.com/davidcoles/cue v0.1.4 // indirect
 	github.com/elastic/go-elasticsearch/v7 v7.17.10 // indirect
 	github.com/google/go-cmp v0.5.9 // indirect
 	github.com/josharian/native v1.0.0 // indirect

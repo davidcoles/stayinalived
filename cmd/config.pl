@@ -38,7 +38,7 @@ $json->{'services'} = services($scheduler, $services, \%defaults, $servers, $pol
 $json->{'bgp'} = new_rhi($conf->{'bgp'}, $conf->{'prefixes'});
 $conf->{'learn'}+=0 if defined $conf->{'learn'};
 
-foreach(qw(vlans multicast webserver webroot defcon logging address interfaces native untagged)) {
+foreach(qw(vlans multicast webserver webroot defcon logging address interfaces native untagged host_id)) {
     $json->{$_} = $conf->{$_} if exists $conf->{$_};
 }
 
@@ -60,6 +60,11 @@ if(defined $conf->{'bgp'} && $conf->{'bgp'}->{'learn'} > 0) {
 
 if(defined $json->{'logging'}) {
     $json->{'logging'}->{'alert'}+=0;
+
+#    if(defined $json->{'logging'}->{'elasticsearch'}) {
+#	my $val = jsonbool($json->{'logging'}->{'elasticsearch'}->{'data_stream'});
+#	$json->{'logging'}->{'elasticsearch'}->{'data_stream'} = $val;
+ #   }
 }
 
 if(defined $json->{'logging'}) {

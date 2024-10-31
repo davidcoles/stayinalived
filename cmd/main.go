@@ -20,20 +20,27 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"flag"
+	"fmt"
 	"log"
 	"net"
+	"net/http"
 	"net/netip"
 	"os"
 	"os/signal"
 	"syscall"
 	"time"
 
+	"github.com/cloudflare/ipvs"
+
 	"vc5"
 )
 
 // TODO:
 // * merge manager changes back to vc5 repo
+
+type KV = map[string]any
 
 func main() {
 
@@ -43,17 +50,20 @@ func main() {
 
 	webroot := flag.String("r", "", "webserver root directory")
 	webserver := flag.String("w", ":80", "webserver listen address")
-	addr := flag.String("a", "", "address")
+	listen := flag.Bool("b", false, "Enable BGP listener on port 179")
 	ipset := flag.String("s", "", "ipset")
 	iface := flag.String("i", "", "interface to add VIPs to")
-	sni := flag.Bool("S", false, "Enable SNI mode for probes")
+	//sni := flag.Bool("S", false, "Enable SNI mode for probes")
 	asn := flag.Uint("A", 0, "Autonomous system number to enable loopback BGP") // experimental - may change
 	hardfail := flag.Bool("H", false, "Hard fail on configuration apply")       // experimental - may change
+
+	hostid := flag.String("h", "", "Host ID for logging")
 
 	flag.Parse()
 
 	args := flag.Args()
-	file := args[0]
+	addr := args[0]
+	file := args[1]
 
 	config, err := vc5.Load(file)
 
@@ -65,21 +75,17 @@ func main() {
 		log.Fatal("Couldn't validate config file: ", err)
 	}
 
-	logs := vc5.NewLogger(config.HostID, config.LoggingConfig())
-
-	if config.Address != "" {
-		*addr = config.Address
+	if *hostid == "" {
+		*hostid = addr
 	}
 
-	if config.Webserver != "" {
-		*webserver = config.Webserver
-	}
+	logs := vc5.NewLogger(*hostid, config.LoggingConfig())
 
-	if config.Webroot != "" {
-		*webroot = config.Webroot
-	}
+	address, err := netip.ParseAddr(addr)
 
-	address := netip.MustParseAddr(*addr)
+	if err != nil {
+		logs.Fatal(F, "args", KV{"error.message": "Invalid address"})
+	}
 
 	if !address.Is4() {
 		//logs.EMERG(F, "Address is not IPv4:", address)
@@ -88,7 +94,7 @@ func main() {
 
 	routerID := address.As4()
 
-	var webListener, bgpListener net.Listener
+	var webListener net.Listener
 
 	if *webserver != "" {
 		webListener, err = net.Listen("tcp", *webserver)
@@ -97,10 +103,10 @@ func main() {
 		}
 	}
 
-	if config.Listen {
-		bgpListener, err = net.Listen("tcp", ":179")
+	if *listen {
+		err = bgpListener(logs)
 		if err != nil {
-			log.Fatal("Couldn't listen on BGP port", err)
+			log.Fatal(err)
 		}
 	}
 
@@ -138,16 +144,16 @@ func main() {
 	// The manager handles the main event loop, healthchecks, requests
 	// for the console/metrics, sets up BGP sessions, etc.
 	manager := &vc5.Manager{
-		Balancer:    balancer,
-		Logs:        logs,
-		Address:     address,      // Required for SYN probes
-		RouterID:    routerID,     // BGP router ID to use to speak to peers
-		SNI:         *sni,         // Needs to be true for servers that are picky about SNI names (should really be the default)
+		Balancer: balancer,
+		Logs:     logs,
+		Address:  address,  // Required for SYN probes
+		RouterID: routerID, // BGP router ID to use to speak to peers
+		//SNI:         *sni,         // Needs to be true for servers that are picky about SNI names (should really be the default)
 		WebRoot:     *webroot,     // Serve static files from this directory
 		BGPLoopback: uint16(*asn), // If non-zero then loopback BGP is activated
-		BGPListener: bgpListener,  // Listen for incoming BGP connections if not nil
-		WebListener: webListener,  // Listen for incoming web connections if not nil
-		HardFail:    *hardfail,    // Exit if the balancer's Configure() argment returns an error (should really be the default)
+		//BGPListener: bgpListener,  // Listen for incoming BGP connections if not nil
+		WebListener: webListener, // Listen for incoming web connections if not nil
+		HardFail:    *hardfail,   // Exit if the balancer's Configure() argment returns an error (should really be the default)
 	}
 
 	if err := manager.Manage(ctx, config); err != nil {
@@ -177,10 +183,7 @@ func main() {
 
 			if err == nil {
 				config = conf
-				config.Address = *addr
-				config.Webserver = *webserver
-				config.Webroot = *webroot
-				manager.Configure(config)
+				manager.Configure(conf)
 			} else {
 				text := "Couldn't load config file " + file + " :" + err.Error()
 				logs.Alert(vc5.ALERT, F, "config", KV{"file.path": file, "error.message": err.Error()}, text)
@@ -193,4 +196,81 @@ func main() {
 			return
 		}
 	}
+}
+
+func bgpListener(logs vc5.Logger) error {
+	F := "bgp.listener"
+
+	l, err := net.Listen("tcp", ":179")
+
+	if err == nil {
+		go func() {
+			for {
+				conn, err := l.Accept()
+
+				if err != nil {
+					logs.Event(vc5.ERR, F, "accept", KV{"error.message": err.Error()})
+				} else {
+					go func(c net.Conn) {
+						defer c.Close()
+						logs.Event(vc5.INFO, F, "accept", KV{"client.address": conn.RemoteAddr().String()})
+						time.Sleep(time.Second * 10)
+					}(conn)
+				}
+			}
+		}()
+	}
+
+	return err
+}
+
+func httpEndpoints(client Client) {
+
+	// Remove this if migrating to a different load balancing engine
+	http.HandleFunc("/lb.json", func(w http.ResponseWriter, r *http.Request) {
+		var ret []interface{}
+		type status struct {
+			Service      ipvs.ServiceExtended
+			Destinations []ipvs.DestinationExtended
+		}
+		info, _ := client.Info()
+		svcs, _ := client.Services()
+		for _, se := range svcs {
+			dsts, _ := client.Destinations(se.Service)
+			ret = append(ret, status{Service: se, Destinations: dsts})
+		}
+
+		js, err := json.MarshalIndent(struct {
+			Info     any
+			Services []any
+		}{
+			Info:     info,
+			Services: ret,
+		}, "", " ")
+
+		if err != nil {
+			w.WriteHeader(http.StatusInternalServerError)
+			return
+		}
+
+		js = append(js, 0x0a)
+		w.Header().Set("Content-Type", "application/json")
+		w.Write(js)
+	})
+
+}
+
+func validate(config *vc5.Config) error {
+
+	str := func(s vc5.Service) string {
+		return fmt.Sprintf("%s:%d:%s", s.Address, s.Port, s.Protocol)
+	}
+
+	for t, s := range config.Services {
+		if _, _, err := ipvsScheduler(s.Scheduler, s.Sticky); err != nil {
+			return fmt.Errorf("Service %s : %s", str(t), err.Error())
+		}
+	}
+
+	return nil
 }

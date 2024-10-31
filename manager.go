@@ -45,10 +45,11 @@ type Manager struct {
 	WebRoot     string
 	BGPLoopback uint16
 	NAT         func(netip.Addr, netip.Addr) (netip.Addr, bool)
-	Prober      func(Instance, Check) (bool, string)
+	Prober      func(netip.Addr, netip.Addr, Check) (bool, string)
 	RouterID    [4]byte
 	WebListener net.Listener
-	BGPListener net.Listener
+	Interval    uint8
+	Learn       uint
 
 	Address netip.Addr
 	SNI     bool
@@ -65,24 +66,46 @@ type Manager struct {
 
 type Check = mon.Check
 
-func Monitor(addr netip.Addr, sni bool) (*mon.Mon, error) {
-	m, err := mon.New(addr, nil, nil, nil)
-	if m != nil {
-		m.SNI = sni
+func Monitor(addr netip.Addr, cic bool) (*mon.Mon, error) {
+	m := &mon.Mon{
+		IPv4:                 addr, // for SYN probes
+		CloseIdleConnections: cic,
 	}
-	return m, err
+
+	err := m.Init(nil)
+
+	if err != nil {
+		return nil, err
+	}
+
+	return m, nil
 }
 
 func (m *Manager) Probe(_ *mon.Mon, i mon.Instance, check mon.Check) (ok bool, diagnostic string) {
-	s := Service{Address: i.Service.Address, Port: i.Service.Port, Protocol: Protocol(i.Service.Protocol)}
-	d := Destination{Address: i.Destination.Address, Port: i.Destination.Port}
-	return m.Prober(Instance{Service: s, Destination: d}, check)
+
+	vip := i.Service.Address
+	rip := i.Destination.Address
+
+	if m.NAT != nil {
+		// if we're using NAT to reach the backend then map the VIP/RIP tuple to the NAT address
+		rip, ok = m.NAT(vip, rip)
+		if !ok {
+			return false, "NAT lookup failed"
+		}
+	}
+
+	return m.Prober(vip, rip, check)
 }
 
 func (m *Manager) Manage(ctx context.Context, cfg *Config) error {
 	// mostly lifted from main.go - probably need a bit of rationalising
 
 	m.config = cfg
+
+	learn := time.Duration(m.Learn)
+	if learn == 0 {
+		learn = 1
+	}
 
 	start := time.Now()
 	F := "vc5"
@@ -114,19 +137,27 @@ func (m *Manager) Manage(ctx context.Context, cfg *Config) error {
 		return err
 	}
 
-	var old map[Instance]Stats
-
+	old := map[Instance]Stats{}
 	m.vip = map[netip.Addr]state{}
-	m.services, old, _ = serviceStatus(m.config, m.Balancer, m.Director, nil)
+	m.summary, m.services, old = serviceStatus(m.config, m.Balancer, m.Director, nil)
 
 	// Collect stats
 	go func() {
-		ticker := time.NewTicker(10 * time.Second)
+
+		interval := m.Interval
+
+		if interval == 0 {
+			interval = 10
+		}
+
+		ticker := time.NewTicker(time.Duration(interval) * time.Second)
 		defer ticker.Stop()
+
 		for {
+			var summary Summary
 			m.mutex.Lock()
-			m.summary.Update(m.Balancer.Summary(), start)
-			m.services, old, m.summary.Current = serviceStatus(m.config, m.Balancer, m.Director, old)
+			summary, m.services, old = serviceStatus(m.config, m.Balancer, m.Director, old)
+			m.summary.Update(summary, start)
 			m.mutex.Unlock()
 			select {
 			case <-ticker.C:
@@ -138,7 +169,7 @@ func (m *Manager) Manage(ctx context.Context, cfg *Config) error {
 
 	// advertise VIPs via BGP
 	go func() {
-		timer := time.NewTimer(m.config.Learn * time.Second)
+		timer := time.NewTimer(learn * time.Second)
 		ticker := time.NewTicker(5 * time.Second)
 		services := m.Director.Status()
 
@@ -169,12 +200,11 @@ func (m *Manager) Manage(ctx context.Context, cfg *Config) error {
 				err := m.Balancer.Configure(manifests)
 				m.mutex.Unlock()
 				if err != nil {
-					//log.Println("xxx", err)
 					// if the configuration failed then the system is in an corrupt state
-					// so the best thing to do is exit (set HardFail)
+					// so the best thing to do is exit? (set HardFail) - not default yet
 					text := "Couldn't apply config: " + err.Error()
 					if m.HardFail {
-						m.Logs.Alert(ERR, F, "manager", KV{"error.message": text}, text)
+						m.Logs.Fatal(F, "manager", KV{"error.message": text})
 					} else {
 						m.Logs.Alert(ERR, F, "manager", KV{"error.message": text}, text)
 					}
@@ -295,10 +325,6 @@ func (m *Manager) Manage(ctx context.Context, cfg *Config) error {
 		w.Write(js)
 		w.Write([]byte("\n"))
 	})
-
-	if m.BGPListener != nil {
-		go bgpListener(m.BGPListener, m.Logs)
-	}
 
 	listener := m.WebListener
 	if listener != nil {
@@ -481,22 +507,5 @@ func VipLog(services []cue.Service, old map[netip.Addr]bool, priorities map[neti
 
 	return m
 }
+
 */
-
-func bgpListener(l net.Listener, logs Logger) {
-	F := "bgp.listener"
-
-	for {
-		conn, err := l.Accept()
-
-		if err != nil {
-			logs.Event(ERR, F, "accept", KV{"error.message": err.Error()})
-		} else {
-			go func(c net.Conn) {
-				logs.Event(INFO, F, "accept", KV{"client.address": conn.RemoteAddr().String()})
-				defer c.Close()
-				time.Sleep(time.Second * 10)
-			}(conn)
-		}
-	}
-}

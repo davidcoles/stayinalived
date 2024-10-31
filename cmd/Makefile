@@ -21,5 +21,6 @@ pre-commit:
 
 sync:
 	cp ../../vc5/cmd/config.pl .
-	rsync -av --exclude=main.go --exclude=balancer.go --exclude=xvs.go ../../vc5/cmd/*.go .
-	rsync -av --delete ../../vc5/cmd/static/ static/
+	cp ../../vc5/*.go ../
+	cp ../../vc5/go.??? ../
+	rsync -av --delete ../../vc5/static/ ../static/

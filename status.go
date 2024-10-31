@@ -260,15 +260,15 @@ type Instance struct {
 	Destination Destination
 }
 
-type Manifest cue.Service             // so we don't have to explicitly pull cue into the balancer - not keen on the name though
+type Manifest cue.Service // so we don't have to explicitly pull cue into the balancer - not keen on the name though
+type DestinationSpec = cue.Destination
+
 func (s Manifest) Service() Service   { return s.Instance().Service }
 func (s Manifest) Instance() Instance { return instance(cue.Service(s), cue.Destination{}) }
 
-type Backend = cue.Destination
-
 type Balancer interface {
-	Stats() map[Instance]Stats
-	Summary() Summary
+	Stats() (Summary, map[Instance]Stats)
+	//Summary() Summary
 	Configure([]Manifest) error
 }
 
@@ -291,13 +291,14 @@ func calculateRate(s Stats, o Stats) Stats {
 	return s
 }
 
-func serviceStatus(config *Config, balancer Balancer, director *cue.Director, old map[Instance]Stats) (servicemap, map[Instance]Stats, uint64) {
+func serviceStatus(config *Config, balancer Balancer, director *cue.Director, old map[Instance]Stats) (Summary, servicemap, map[Instance]Stats) {
 
 	var current uint64
 
 	stats := map[Instance]Stats{}
 	status := map[netip.Addr][]serv{}
-	allstats := balancer.Stats()
+	summary, allstats := balancer.Stats()
+	//summary := balancer.Summary()
 
 	for _, svc := range director.Status() {
 		cnf, _ := config.Services[Manifest(svc).Service()]
@@ -362,7 +363,9 @@ func serviceStatus(config *Config, balancer Balancer, director *cue.Director, ol
 		status[svc.Address] = append(status[svc.Address], serv)
 	}
 
-	return status, stats, current
+	summary.Current = current
+
+	return summary, status, stats
 }
 
 func destination(d cue.Destination) Destination { return Destination{Address: d.Address, Port: d.Port} }

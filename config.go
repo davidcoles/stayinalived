@@ -29,7 +29,7 @@ import (
 	"os"
 	"regexp"
 	"strconv"
-	"time"
+	//"time"
 
 	"github.com/davidcoles/cue"
 	"github.com/davidcoles/cue/bgp"
@@ -82,24 +82,11 @@ type services map[Service]ServiceDefinition
 
 // Load balancer configuration
 type Config struct {
-	Services services `json:"services,omitempty"`
-
-	// VLAN ID to subnet mappings
-	VLANs map[uint16]Prefix `json:"vlans,omitempty"`
-
-	BGP map[string]bgp.Parameters `json:"bgp,omitempty"`
-
-	Learn      time.Duration `json:"learn,omitempty"`
-	Listen     bool          `json:"listen,omitempty"`
-	Multicast  string        `json:"multicast,omitempty"`
-	Webserver  string        `json:"webserver,omitempty"`
-	Webroot    string        `json:"webroot,omitempty"`
-	Logging    Logging_      `json:"logging,omitempty"`
-	Native     bool          `json:"native,omitempty"`
-	Untagged   bool          `json:"untagged,omitempty"`
-	Address    string        `json:"address,omitempty"`
-	Interfaces []string      `json:"interfaces,omitempty"`
-	HostID     string        `json:"host_id,omitempty"`
+	Services services                  `json:"services,omitempty"`
+	VLANs    map[uint16]Prefix         `json:"vlans,omitempty"` // VLAN ID to subnet mappings
+	BGP      map[string]bgp.Parameters `json:"bgp,omitempty"`   // BGP peers
+	//Learn    time.Duration             `json:"learn,omitempty"`
+	Logging Logging_ `json:"logging,omitempty"`
 }
 
 func (c *Config) LoggingConfig() Logging {
