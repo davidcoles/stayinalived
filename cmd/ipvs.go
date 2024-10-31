@@ -193,13 +193,6 @@ func ipvsScheduler(scheduler string, sticky bool) (string, ipvs.Flags, error) {
 	return "wlc", flags, fmt.Errorf("%s is not a valid scheduler name", scheduler)
 }
 
-func updown(b bool) string {
-	if b {
-		return "up"
-	}
-	return "down"
-}
-
 func tcpStats() map[vc5.Instance]tcpstats {
 
 	type l4 struct {
